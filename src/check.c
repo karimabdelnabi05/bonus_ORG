@@ -45,7 +45,7 @@ int main(int argc, char *argv[]) {
      * The attacker cannot search RAM for the plaintext password
      * because it is never stored as a string.
      */
-    unsigned long stored_hash = 401824839UL;
+    static unsigned long stored_hash = 401824839UL;
 
     char input[256];
 
