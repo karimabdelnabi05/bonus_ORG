@@ -88,8 +88,9 @@ static int snapshot_memory(HANDLE hProcess, MemRegion **regions, int *count) {
 
     while (VirtualQueryEx(hProcess, scan_addr, &mbi, sizeof(mbi))) {
         if (mbi.State == MEM_COMMIT &&
-            (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) &&
+            (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY | PAGE_READONLY | PAGE_EXECUTE_READ)) &&
             !(mbi.Protect & PAGE_GUARD) &&
+            !(mbi.Protect & PAGE_NOACCESS) &&
             mbi.RegionSize < 10 * 1024 * 1024) {
 
             unsigned char *buf = (unsigned char *)malloc(mbi.RegionSize);

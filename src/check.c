@@ -31,21 +31,14 @@ static unsigned long hash_password(const char *str) {
     return hash;
 }
 
+/* Global stored hash variable located in the binary's .data section */
+volatile unsigned long stored_hash = 401824839UL;
+
 int main(int argc, char *argv[]) {
     int daemon_mode = 0;
     if (argc > 1 && (strcmp(argv[1], "-d") == 0 || strcmp(argv[1], "--daemon") == 0)) {
         daemon_mode = 1;
     }
-
-    /*
-     * Pre-computed hash of the secret password.
-     * The original password string does NOT exist anywhere in memory.
-     * This value was computed offline: hash_password("s3cr3t") == 3511886547
-     *
-     * The attacker cannot search RAM for the plaintext password
-     * because it is never stored as a string.
-     */
-    static unsigned long stored_hash = 401824839UL;
 
     char input[256];
 
