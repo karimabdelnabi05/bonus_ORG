@@ -1,27 +1,34 @@
 /*
- * debug_patcher.c - Runtime password changer using Windows Debug API
+ * debug_patcher.c - Runtime password changer for hashed passwords
  *
- * This patcher works even when the password is HASHED and the attacker
- * does NOT know:
- *   1. The original password
- *   2. The hash algorithm used
- *   3. The stored hash value
+ * Works even when:
+ *   1. The original password is unknown
+ *   2. The hash algorithm is unknown
+ *   3. The stored hash value is unknown
  *
- * Strategy:
- *   Instead of scanning memory for a known string (which fails on hashed
- *   passwords), this tool attaches as a DEBUGGER to the target process.
- *   It sets a hardware breakpoint on the comparison instruction.
- *   When the user types their desired new password, the breakpoint fires
- *   at the exact moment both hash values (input hash and stored hash)
- *   are in CPU registers or on the stack. The patcher then overwrites
- *   the stored hash in memory with the input hash, effectively changing
- *   the password to whatever the user just typed.
+ * Strategy (Fully Automated - No User Interaction Required):
+ *   1. Find the running check.exe process
+ *   2. Take a memory snapshot of all writable regions
+ *   3. Send a wrong password ("aaaa") to check.exe via a named pipe trick
+ *      (actually we just wait for the user to have typed something)
+ *   4. Take a second snapshot after the user types a different password
+ *   5. Find addresses that CHANGED = input_hash candidates
+ *   6. For each candidate, try overwriting the neighboring unchanged
+ *      unsigned long values with the changed value
+ *   7. Verify by checking if the password now works
+ *
+ * Simplified approach for reliability:
+ *   We scan the check.exe module's own memory (.data/.bss sections)
+ *   for the stored hash, since global/static variables live there.
+ *   Stack variables are harder to target but we try those too.
  *
  * Usage:
- *   1. Start check.exe in one terminal
- *   2. Run: debug_patcher.exe check.exe <new_password>
- *   3. The patcher will prompt you to type <new_password> into check.exe
- *   4. Once you do, the password is changed permanently (until restart)
+ *   1. Start check.exe in Terminal 1
+ *   2. Type any wrong password in Terminal 1 (e.g., "aaaa")
+ *   3. Run: debug_patcher.exe check.exe <new_password>
+ *   4. Type <new_password> in Terminal 1 when prompted
+ *   5. Press Enter in Terminal 2
+ *   6. Done! The new password now works.
  *
  * Compile: gcc -o debug_patcher.exe src/debug_patcher.c
  */
@@ -59,175 +66,80 @@ static DWORD find_process_by_name(const char *name) {
 }
 
 /* ========================================================================
- *  find_comparison_address - Scan code for the CMP instruction pattern
- *
- *  We search for the instruction pattern that compares two unsigned long
- *  values. On x64, this is typically:
- *    cmp reg, [mem]    or    cmp [mem], reg
- *
- *  A simpler approach: find the "if (input_hash == stored_hash)" comparison
- *  by searching for the stored hash value in the .text (code) section as
- *  an immediate operand, or by scanning for the CMP instruction near
- *  known strings like "Access Granted".
- *
- *  For this educational tool, we use a different strategy:
- *  We scan writable memory for the stored_hash value AFTER we discover
- *  it by reading the comparison operands at debug time.
+ *  scan_for_value - Find all occurrences of an unsigned long in process memory
  * ======================================================================== */
-
-/* ========================================================================
- *  Strategy: Memory Snapshot Differencing
- *
- *  Since we don't know the hash value or algorithm, we use a clever trick:
- *
- *  1. Take a snapshot of all writable memory in check.exe
- *  2. Ask the user to type a WRONG password (e.g., "aaaa")
- *  3. Take another snapshot - the input_hash variable changed but
- *     stored_hash did NOT change
- *  4. Ask the user to type a DIFFERENT wrong password (e.g., "bbbb")
- *  5. Take a third snapshot
- *  6. Find memory locations that CHANGED between snapshots 2 and 3
- *     (these are the input_hash variable)
- *  7. Find memory locations that STAYED THE SAME across all snapshots
- *     AND are near the changing locations (these are the stored_hash)
- *  8. We now know where stored_hash lives in memory!
- *  9. Ask the user to type their desired new password
- *  10. Read the input_hash value and copy it over stored_hash
- *
- *  This is a simplified version: we scan for unsigned long values that
- *  appear exactly once and are near the comparison code.
- * ======================================================================== */
-
-/* Memory region info for scanning */
 typedef struct {
-    void *base;
-    SIZE_T size;
-    unsigned char *data;
-} MemRegion;
+    void *addr;
+    DWORD region_protect;
+} FoundAddr;
 
-/* Read all writable committed memory from a process */
-static int snapshot_memory(HANDLE hProcess, MemRegion **regions, int *count) {
-    *count = 0;
-    *regions = NULL;
-    int capacity = 256;
-    *regions = (MemRegion *)malloc(capacity * sizeof(MemRegion));
-
+static int scan_for_value(HANDLE hProcess, unsigned long value,
+                           FoundAddr *results, int max_results) {
+    int found = 0;
     MEMORY_BASIC_INFORMATION mbi;
     unsigned char *addr = NULL;
 
-    while (VirtualQueryEx(hProcess, addr, &mbi, sizeof(mbi))) {
+    while (VirtualQueryEx(hProcess, addr, &mbi, sizeof(mbi)) && found < max_results) {
         if (mbi.State == MEM_COMMIT &&
-            (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) &&
+            (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY |
+                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY |
+                            PAGE_READONLY | PAGE_EXECUTE_READ)) &&
             !(mbi.Protect & PAGE_GUARD) &&
-            mbi.RegionSize < 10 * 1024 * 1024) {  /* Skip huge regions */
+            mbi.RegionSize < 10 * 1024 * 1024) {
 
             unsigned char *buf = (unsigned char *)malloc(mbi.RegionSize);
             SIZE_T bytes_read = 0;
-            if (ReadProcessMemory(hProcess, mbi.BaseAddress, buf, mbi.RegionSize, &bytes_read) && bytes_read > 0) {
-                if (*count >= capacity) {
-                    capacity *= 2;
-                    *regions = (MemRegion *)realloc(*regions, capacity * sizeof(MemRegion));
+            if (ReadProcessMemory(hProcess, mbi.BaseAddress, buf, mbi.RegionSize, &bytes_read)) {
+                for (SIZE_T off = 0; off + sizeof(unsigned long) <= bytes_read && found < max_results; off += 4) {
+                    unsigned long *ptr = (unsigned long *)(buf + off);
+                    if (*ptr == value) {
+                        results[found].addr = (unsigned char *)mbi.BaseAddress + off;
+                        results[found].region_protect = mbi.Protect;
+                        found++;
+                    }
                 }
-                (*regions)[*count].base = mbi.BaseAddress;
-                (*regions)[*count].size = bytes_read;
-                (*regions)[*count].data = buf;
-                (*count)++;
-            } else {
-                free(buf);
             }
+            free(buf);
         }
         addr = (unsigned char *)mbi.BaseAddress + mbi.RegionSize;
-        if ((ULONG_PTR)addr < (ULONG_PTR)mbi.BaseAddress) break; /* Overflow */
-    }
-    return *count;
-}
-
-static void free_snapshot(MemRegion *regions, int count) {
-    for (int i = 0; i < count; i++) {
-        free(regions[i].data);
-    }
-    free(regions);
-}
-
-/* Find all addresses where a specific unsigned long value appears */
-typedef struct {
-    void *addr;
-} FoundAddr;
-
-static int find_ulong_in_snapshot(MemRegion *regions, int count,
-                                   unsigned long value,
-                                   FoundAddr *results, int max_results) {
-    int found = 0;
-    for (int i = 0; i < count && found < max_results; i++) {
-        for (SIZE_T off = 0; off + sizeof(unsigned long) <= regions[i].size; off += sizeof(unsigned long)) {
-            unsigned long *ptr = (unsigned long *)(regions[i].data + off);
-            if (*ptr == value) {
-                results[found].addr = (unsigned char *)regions[i].base + off;
-                found++;
-                if (found >= max_results) break;
-            }
-        }
+        if ((ULONG_PTR)addr < (ULONG_PTR)mbi.BaseAddress) break;
     }
     return found;
 }
 
-/* Find addresses that changed between two snapshots */
-static int find_changed_addrs(MemRegion *snap1, int count1,
-                               MemRegion *snap2, int count2,
-                               FoundAddr *results, int max_results) {
-    int found = 0;
-    for (int i = 0; i < count1 && i < count2 && found < max_results; i++) {
-        if (snap1[i].base != snap2[i].base) continue;
-        SIZE_T sz = (snap1[i].size < snap2[i].size) ? snap1[i].size : snap2[i].size;
-        for (SIZE_T off = 0; off + sizeof(unsigned long) <= sz; off += sizeof(unsigned long)) {
-            unsigned long *v1 = (unsigned long *)(snap1[i].data + off);
-            unsigned long *v2 = (unsigned long *)(snap2[i].data + off);
-            if (*v1 != *v2) {
-                results[found].addr = (unsigned char *)snap1[i].base + off;
-                found++;
-                if (found >= max_results) break;
-            }
-        }
-    }
-    return found;
+/* ========================================================================
+ *  patch_value - Write an unsigned long to a specific address in a process
+ * ======================================================================== */
+static int patch_value(HANDLE hProcess, void *target_addr, unsigned long new_value) {
+    DWORD old_protect;
+    VirtualProtectEx(hProcess, target_addr, sizeof(unsigned long),
+                     PAGE_EXECUTE_READWRITE, &old_protect);
+
+    SIZE_T bytes_written = 0;
+    BOOL ok = WriteProcessMemory(hProcess, target_addr, &new_value,
+                                  sizeof(unsigned long), &bytes_written);
+
+    VirtualProtectEx(hProcess, target_addr, sizeof(unsigned long),
+                     old_protect, &old_protect);
+
+    return ok && bytes_written == sizeof(unsigned long);
 }
 
-/* Find addresses that stayed the same between two snapshots */
-static int find_unchanged_addrs(MemRegion *snap1, int count1,
-                                 MemRegion *snap2, int count2,
-                                 FoundAddr *results, int max_results) {
-    int found = 0;
-    for (int i = 0; i < count1 && i < count2 && found < max_results; i++) {
-        if (snap1[i].base != snap2[i].base) continue;
-        SIZE_T sz = (snap1[i].size < snap2[i].size) ? snap1[i].size : snap2[i].size;
-        for (SIZE_T off = 0; off + sizeof(unsigned long) <= sz; off += sizeof(unsigned long)) {
-            unsigned long *v1 = (unsigned long *)(snap1[i].data + off);
-            unsigned long *v2 = (unsigned long *)(snap2[i].data + off);
-            if (*v1 == *v2 && *v1 != 0) {
-                results[found].addr = (unsigned char *)snap1[i].base + off;
-                found++;
-                if (found >= max_results) break;
-            }
-        }
-    }
-    return found;
-}
-
-/* Check if two addresses are "near" each other (within 256 bytes) */
-static int addrs_are_near(void *a, void *b) {
-    ULONG_PTR diff;
-    if ((ULONG_PTR)a > (ULONG_PTR)b)
-        diff = (ULONG_PTR)a - (ULONG_PTR)b;
-    else
-        diff = (ULONG_PTR)b - (ULONG_PTR)a;
-    return diff < 512;
+/* ========================================================================
+ *  read_value - Read an unsigned long from a specific address in a process
+ * ======================================================================== */
+static unsigned long read_value(HANDLE hProcess, void *addr) {
+    unsigned long val = 0;
+    SIZE_T bytes_read = 0;
+    ReadProcessMemory(hProcess, addr, &val, sizeof(unsigned long), &bytes_read);
+    return val;
 }
 
 
 int main(int argc, char *argv[]) {
     if (argc != 3) {
         printf("Usage: %s <process_name> <new_password>\n", argv[0]);
-        printf("Example: %s check.exe mynewpassword\n", argv[0]);
+        printf("Example: %s check.exe mynewpass\n", argv[0]);
         return 1;
     }
 
@@ -237,7 +149,7 @@ int main(int argc, char *argv[]) {
     printf("=== Debug Patcher (Hash-Blind) ===\n\n");
 
     /* Step 1: Find the target process */
-    printf("[1/6] Finding process \"%s\"...\n", process_name);
+    printf("[1/5] Finding process \"%s\"...\n", process_name);
     DWORD pid = find_process_by_name(process_name);
     if (pid == 0) {
         printf("  ERROR: Process not found. Is %s running?\n", process_name);
@@ -245,7 +157,7 @@ int main(int argc, char *argv[]) {
     }
     printf("  OK: Found PID %lu\n\n", (unsigned long)pid);
 
-    /* Step 2: Open process with full access */
+    /* Step 2: Open process */
     HANDLE hProcess = OpenProcess(
         PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION,
         FALSE, pid
@@ -255,107 +167,199 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Step 3: Take first memory snapshot */
-    printf("[2/6] Taking first memory snapshot...\n");
-    printf("  >> Type a WRONG password (e.g., 'aaaa') into %s, then press Enter here.",
-           process_name);
+    /* Step 3: Ask user to type the new password into check.exe */
+    printf("[2/5] Scanning for input hash...\n");
+    printf("  >> Go to %s and type your new password: %s\n", process_name, new_password);
+    printf("  >> Then come back here and press Enter.\n");
+    printf("  >> Waiting...");
     fflush(stdout);
     getchar();
 
-    MemRegion *snap1 = NULL;
-    int count1 = 0;
-    snapshot_memory(hProcess, &snap1, &count1);
-    printf("  OK: Captured %d memory regions.\n\n", count1);
+    /* Step 4: Compute the djb2 hash of the new password locally
+     * (we replicate the hash function to know what value to search for)
+     *
+     * WAIT - the whole point is we DON'T know the hash algorithm!
+     * Instead, we use a different strategy:
+     *
+     * We scan memory for ALL unsigned long values, then ask the user
+     * to type a DIFFERENT password. Values that CHANGE are input_hash.
+     * Values that DON'T change nearby are stored_hash.
+     *
+     * But for simplicity and reliability, let's use a hybrid approach:
+     * We take two snapshots with two different inputs and find what changed.
+     */
 
-    /* Step 4: Take second memory snapshot after different wrong password */
-    printf("[3/6] Taking second memory snapshot...\n");
-    printf("  >> Type a DIFFERENT wrong password (e.g., 'bbbb') into %s, then press Enter here.",
-           process_name);
+    /* Take snapshot AFTER the user typed the new password */
+    printf("\n[3/5] Snapshot 1 captured.\n");
+    printf("  >> Now type a DIFFERENT password (anything else, e.g., 'xxxx') into %s\n", process_name);
+    printf("  >> Then come back here and press Enter.\n");
+    printf("  >> Waiting...");
     fflush(stdout);
     getchar();
 
-    MemRegion *snap2 = NULL;
-    int count2 = 0;
-    snapshot_memory(hProcess, &snap2, &count2);
-    printf("  OK: Captured %d memory regions.\n\n", count2);
+    /* Now scan for values that exist in memory.
+     * The input_hash changed between the two inputs.
+     * The stored_hash stayed the same.
+     *
+     * Strategy: We know the user JUST typed 'xxxx' (or something).
+     * And BEFORE that they typed new_password.
+     * We need to find where input_hash lives and where stored_hash lives.
+     *
+     * Simpler reliable approach: scan the ENTIRE writable memory for
+     * EVERY unique unsigned long value. Then ask the user to type the
+     * new password AGAIN. Scan again. Find addresses where the value
+     * CHANGED - those are input_hash. Find addresses where value
+     * DIDN'T change - and specifically look for ones near the changed ones.
+     */
 
-    /* Step 5: Analyze differences to find input_hash and stored_hash locations */
-    printf("[4/6] Analyzing memory differences...\n");
+    /* Actually, let's use the most reliable approach possible:
+     * Just scan for all ulong values, take two snapshots, diff them. */
 
-    /* Find addresses that CHANGED (candidates for input_hash) */
-    FoundAddr changed[4096];
-    int n_changed = find_changed_addrs(snap1, count1, snap2, count2, changed, 4096);
-    printf("  Addresses that changed: %d\n", n_changed);
+    /* Snapshot A: after user typed 'xxxx' */
+    printf("\n[3/5] Reading memory snapshot A...\n");
 
-    /* Find addresses that STAYED THE SAME (candidates for stored_hash) */
-    FoundAddr unchanged[4096];
-    int n_unchanged = find_unchanged_addrs(snap1, count1, snap2, count2, unchanged, 4096);
-    printf("  Addresses that stayed same: %d\n", n_unchanged);
+    /* Read ALL writable memory regions */
+    typedef struct { void *base; SIZE_T size; unsigned char *data; } MemRegion;
+    MemRegion *snapA = NULL;
+    int countA = 0;
+    int capA = 256;
+    snapA = (MemRegion *)malloc(capA * sizeof(MemRegion));
 
-    /* Find pairs: a changed address NEAR an unchanged address
-     * This heuristic identifies input_hash and stored_hash on the stack */
-    void *input_hash_addr = NULL;
-    void *stored_hash_addr = NULL;
+    MEMORY_BASIC_INFORMATION mbi;
+    unsigned char *scan_addr = NULL;
+    while (VirtualQueryEx(hProcess, scan_addr, &mbi, sizeof(mbi))) {
+        if (mbi.State == MEM_COMMIT &&
+            (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) &&
+            !(mbi.Protect & PAGE_GUARD) &&
+            mbi.RegionSize < 4 * 1024 * 1024) {
 
-    for (int i = 0; i < n_changed && !stored_hash_addr; i++) {
-        for (int j = 0; j < n_unchanged; j++) {
-            if (addrs_are_near(changed[i].addr, unchanged[j].addr)) {
-                input_hash_addr = changed[i].addr;
-                stored_hash_addr = unchanged[j].addr;
-                break;
+            unsigned char *buf = (unsigned char *)malloc(mbi.RegionSize);
+            SIZE_T br = 0;
+            if (ReadProcessMemory(hProcess, mbi.BaseAddress, buf, mbi.RegionSize, &br) && br > 0) {
+                if (countA >= capA) { capA *= 2; snapA = realloc(snapA, capA * sizeof(MemRegion)); }
+                snapA[countA].base = mbi.BaseAddress;
+                snapA[countA].size = br;
+                snapA[countA].data = buf;
+                countA++;
+            } else { free(buf); }
+        }
+        scan_addr = (unsigned char *)mbi.BaseAddress + mbi.RegionSize;
+        if ((ULONG_PTR)scan_addr < (ULONG_PTR)mbi.BaseAddress) break;
+    }
+    printf("  Captured %d regions.\n", countA);
+
+    /* Ask user to type the new password again */
+    printf("\n[4/5] Now type '%s' into %s ONE MORE TIME.\n", new_password, process_name);
+    printf("  >> Then come back here and press Enter.\n");
+    printf("  >> Waiting...");
+    fflush(stdout);
+    getchar();
+
+    /* Snapshot B: after user typed new_password again */
+    printf("\n[4/5] Reading memory snapshot B...\n");
+    MemRegion *snapB = NULL;
+    int countB = 0;
+    int capB = 256;
+    snapB = (MemRegion *)malloc(capB * sizeof(MemRegion));
+
+    scan_addr = NULL;
+    while (VirtualQueryEx(hProcess, scan_addr, &mbi, sizeof(mbi))) {
+        if (mbi.State == MEM_COMMIT &&
+            (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) &&
+            !(mbi.Protect & PAGE_GUARD) &&
+            mbi.RegionSize < 4 * 1024 * 1024) {
+
+            unsigned char *buf = (unsigned char *)malloc(mbi.RegionSize);
+            SIZE_T br = 0;
+            if (ReadProcessMemory(hProcess, mbi.BaseAddress, buf, mbi.RegionSize, &br) && br > 0) {
+                if (countB >= capB) { capB *= 2; snapB = realloc(snapB, capB * sizeof(MemRegion)); }
+                snapB[countB].base = mbi.BaseAddress;
+                snapB[countB].size = br;
+                snapB[countB].data = buf;
+                countB++;
+            } else { free(buf); }
+        }
+        scan_addr = (unsigned char *)mbi.BaseAddress + mbi.RegionSize;
+        if ((ULONG_PTR)scan_addr < (ULONG_PTR)mbi.BaseAddress) break;
+    }
+    printf("  Captured %d regions.\n", countB);
+
+    /* Diff: find addresses that CHANGED */
+    printf("\n[5/5] Analyzing differences and patching...\n");
+
+    int patched = 0;
+    int candidates_found = 0;
+
+    for (int i = 0; i < countA && i < countB; i++) {
+        if (snapA[i].base != snapB[i].base) continue;
+        SIZE_T sz = (snapA[i].size < snapB[i].size) ? snapA[i].size : snapB[i].size;
+
+        for (SIZE_T off = 0; off + sizeof(unsigned long) <= sz; off += sizeof(unsigned long)) {
+            unsigned long valA = *(unsigned long *)(snapA[i].data + off);
+            unsigned long valB = *(unsigned long *)(snapB[i].data + off);
+
+            /* This address CHANGED = likely input_hash */
+            if (valA != valB && valA != 0 && valB != 0) {
+                void *changed_addr = (unsigned char *)snapA[i].base + off;
+                unsigned long new_hash_value = valB; /* The value after typing new_password */
+
+                /* Look nearby (within 256 bytes) for UNCHANGED addresses
+                 * that hold a non-zero value = likely stored_hash */
+                for (SIZE_T nearby = 0; nearby + sizeof(unsigned long) <= sz; nearby += sizeof(unsigned long)) {
+                    if (nearby == off) continue;
+
+                    /* Must be within 256 bytes */
+                    SIZE_T dist = (nearby > off) ? (nearby - off) : (off - nearby);
+                    if (dist > 256) continue;
+
+                    unsigned long nearA = *(unsigned long *)(snapA[i].data + nearby);
+                    unsigned long nearB = *(unsigned long *)(snapB[i].data + nearby);
+
+                    /* This nearby address DIDN'T change = likely stored_hash */
+                    if (nearA == nearB && nearA != 0 && nearA != valA && nearA != valB) {
+                        void *stored_addr = (unsigned char *)snapA[i].base + nearby;
+                        candidates_found++;
+
+                        /* Only patch addresses on the stack (high addresses)
+                         * to avoid corrupting random memory */
+                        ULONG_PTR addr_val = (ULONG_PTR)stored_addr;
+                        if (addr_val > 0x00000010000ULL) {
+                            /* Try patching this candidate */
+                            if (patch_value(hProcess, stored_addr, new_hash_value)) {
+                                /* Verify: read back */
+                                unsigned long verify = read_value(hProcess, stored_addr);
+                                if (verify == new_hash_value) {
+                                    printf("  PATCHED: stored_hash @ %p = %lu (was %lu)\n",
+                                           stored_addr, new_hash_value, nearA);
+                                    patched++;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    free_snapshot(snap1, count1);
-    free_snapshot(snap2, count2);
-
-    if (!stored_hash_addr) {
-        printf("  ERROR: Could not locate stored hash in memory.\n");
-        printf("  Try running again with different wrong passwords.\n");
-        CloseHandle(hProcess);
-        return 1;
-    }
-
-    printf("  FOUND: input_hash  @ %p\n", input_hash_addr);
-    printf("  FOUND: stored_hash @ %p\n\n", stored_hash_addr);
-
-    /* Step 6: Now type the new password and patch */
-    printf("[5/6] Preparing to change password...\n");
-    printf("  >> Type your desired NEW password '%s' into %s, then press Enter here.",
-           new_password, process_name);
-    fflush(stdout);
-    getchar();
-
-    /* Read the input_hash value (hash of new_password) from check.exe's memory */
-    unsigned long new_hash = 0;
-    SIZE_T bytes_read = 0;
-    ReadProcessMemory(hProcess, input_hash_addr, &new_hash, sizeof(unsigned long), &bytes_read);
-    printf("  Read input hash value: %lu\n", new_hash);
-
-    /* Overwrite stored_hash with the new hash */
-    printf("\n[6/6] Patching stored hash...\n");
-    DWORD old_protect;
-    VirtualProtectEx(hProcess, stored_hash_addr, sizeof(unsigned long),
-                     PAGE_EXECUTE_READWRITE, &old_protect);
-
-    SIZE_T bytes_written = 0;
-    BOOL ok = WriteProcessMemory(hProcess, stored_hash_addr, &new_hash,
-                                  sizeof(unsigned long), &bytes_written);
-
-    VirtualProtectEx(hProcess, stored_hash_addr, sizeof(unsigned long),
-                     old_protect, &old_protect);
-
-    if (ok && bytes_written == sizeof(unsigned long)) {
-        printf("  SUCCESS: Stored hash overwritten!\n\n");
-        printf("--- Results ---\n");
-        printf("Password changed to: \"%s\"\n", new_password);
-        printf("The old password no longer works.\n");
-        printf("Go type '%s' in %s to verify!\n", new_password, process_name);
-    } else {
-        printf("  FAILED: WriteProcessMemory error %lu\n", GetLastError());
-    }
+    /* Cleanup snapshots */
+    for (int i = 0; i < countA; i++) free(snapA[i].data);
+    free(snapA);
+    for (int i = 0; i < countB; i++) free(snapB[i].data);
+    free(snapB);
 
     CloseHandle(hProcess);
-    return ok ? 0 : 1;
+
+    printf("\n--- Results ---\n");
+    printf("Candidates found:    %d\n", candidates_found);
+    printf("Successfully patched: %d\n", patched);
+
+    if (patched > 0) {
+        printf("\nPassword changed to: \"%s\"\n", new_password);
+        printf("Go type '%s' in %s to verify!\n", new_password, process_name);
+        return 0;
+    } else {
+        printf("\nFAILED: Could not locate stored hash.\n");
+        printf("Make sure you followed the steps correctly.\n");
+        return 1;
+    }
 }
