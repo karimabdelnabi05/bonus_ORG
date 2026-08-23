@@ -12,7 +12,7 @@ This report documents the design, theoretical foundations, implementation, and e
 
 Two distinct approaches were demonstrated and evaluated:
 1. **Programmatic Approach**: A custom C application (`patcher.exe`) using Win32 Process Memory APIs (`OpenProcess`, `VirtualQueryEx`, `ReadProcessMemory`, `WriteProcessMemory`).
-2. **Manual GUI Approach**: Interactive dynamic inspection using **Cheat Engine**.
+2. **Manual GUI Approach**: Interactive dynamic memory inspection and pattern editing using **x64dbg** debugger.
 
 ---
 
@@ -107,12 +107,12 @@ ALL TESTS PASSED
 
 ## 5. Comparison of Approaches
 
-| Criteria | Programmatic (`patcher.exe`) | Manual GUI (Cheat Engine / x64dbg) |
+| Criteria | Programmatic (`patcher.exe`) | Manual GUI (`x64dbg` Debugger) |
 |---|---|---|
-| **Automation** | 100% automated scriptable CLI | Manual interactive workflow |
-| **Speed** | Instant (<50ms execution) | Requires manual scan & edit (~1-2 minutes) |
-| **ASLR Resilience** | Built-in via dynamic `VirtualQueryEx` scan | Manual search/pattern match per session |
-| **Dependencies** | Standard Win32 API (`kernel32.dll`) | Requires standalone GUI tools (Cheat Engine / x64dbg) |
+| **Automation** | 100% automated scriptable CLI | Manual interactive GUI workflow |
+| **Speed** | Instant (<50ms execution) | Requires manual search & edit (~1 minute) |
+| **ASLR Resilience** | Built-in via dynamic `VirtualQueryEx` scan | Manual pattern search per session |
+| **Dependencies** | Standard Win32 API (`kernel32.dll`) | Requires standalone x64dbg debugger |
 | **Educational Value** | Deep understanding of Win32 process memory internal APIs | Interactive visual memory inspection & disassembly analysis |
 
 ---

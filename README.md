@@ -60,8 +60,9 @@ tests/
   test_check.c     # check.exe integration tests
   test_patcher.c   # Patcher unit + integration tests
 docs/
+  x64dbg-guide.md        # Manual approach using x64dbg debugger
   cheat-engine-guide.md  # Manual approach using Cheat Engine
-  report.md              # Full project report
+  report.md              # Full project report for professor submission
 Makefile
 ```
 
@@ -69,5 +70,5 @@ Makefile
 
 This project documents two approaches to runtime memory patching:
 
-1. **Programmatic** (this codebase) - Custom C tool using Windows API
-2. **Manual** (Cheat Engine) - GUI-based memory scanner - see `docs/cheat-engine-guide.md`
+1. **Programmatic** (this codebase) - Custom C tool using Windows API (`patcher.exe`)
+2. **Manual** (x64dbg / Cheat Engine) - Interactive debugger memory inspection - see [`docs/x64dbg-guide.md`](docs/x64dbg-guide.md)
