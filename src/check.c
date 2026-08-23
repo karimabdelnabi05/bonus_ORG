@@ -71,7 +71,7 @@ int main(int argc, char *argv[]) {
          * The comparison uses two unsigned long values (not strings).
          * A standard string scanner searching for "s3cr3t" will find nothing.
          */
-        unsigned long input_hash = hash_password(input);
+        volatile unsigned long input_hash = hash_password(input);
 
         if (input_hash == stored_hash) {
             printf("Access Granted\n");

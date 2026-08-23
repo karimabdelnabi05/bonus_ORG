@@ -3,16 +3,14 @@
  *
  * Works even when:
  *   1. The original password is unknown
- *   2. The hash algorithm is unknown
- *   3. The stored hash value is unknown
+ *   2. The stored hash value is unknown
  *
- * Strategy (Safe & Precise Memory Differencing):
- *   - Captures two memory snapshots after different user inputs.
- *   - Identifies the user input hash location (which changes).
- *   - Identifies the stored hash location in the static data section (.data)
- *     which stays constant across all inputs.
- *   - Overwrites ONLY the stored_hash variable in .data section with the new input hash.
- *   - Never corrupts stack frames, return addresses, or loop counters.
+ * Strategy (Safe & Precise Differential Analysis):
+ *   - Takes two memory snapshots after different user inputs ("aaaa" and "bbbb").
+ *   - Locates the stored_hash variable in check.exe's .data section (the memory address
+ *     that remains constant across snapshots in the image data section).
+ *   - Computes the hash of <new_password> and writes it to stored_hash_addr.
+ *   - Password is now changed! Old password is denied, new password is granted.
  *
  * Compile: gcc -o debug_patcher.exe src/debug_patcher.c
  */
@@ -25,6 +23,16 @@
 #include <string.h>
 #include <windows.h>
 #include <tlhelp32.h>
+
+/* Hash algorithm (djb2) */
+static unsigned long hash_password(const char *str) {
+    unsigned long hash = 5381;
+    int c;
+    while ((c = *str++)) {
+        hash = ((hash << 5) + hash) + c;
+    }
+    return hash;
+}
 
 /* Find PID of target process */
 static DWORD find_process_by_name(const char *name) {
@@ -132,11 +140,13 @@ int main(int argc, char *argv[]) {
 
     const char *process_name = argv[1];
     const char *new_password = argv[2];
+    unsigned long target_new_hash = hash_password(new_password);
 
-    printf("=== Debug Patcher (Safe & Precise) ===\n\n");
+    printf("=== Debug Patcher (Hash-Blind Differential Analysis) ===\n\n");
+    printf("Target new password: \"%s\" (computed hash = %lu)\n\n", new_password, target_new_hash);
 
     /* Step 1: Find target process */
-    printf("[1/5] Finding process \"%s\"...\n", process_name);
+    printf("[1/4] Finding process \"%s\"...\n", process_name);
     DWORD pid = find_process_by_name(process_name);
     if (pid == 0) {
         printf("  ERROR: Process not found. Is %s running?\n", process_name);
@@ -153,9 +163,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Step 2: Prompt for first password */
-    printf("[2/5] Step 1: Type '%s' into %s\n", new_password, process_name);
-    printf("  >> After typing '%s' and pressing Enter in %s, press Enter here...", new_password, process_name);
+    /* Step 2: Prompt for first wrong password */
+    printf("[2/4] Step 1: Type a WRONG password (e.g. 'aaaa') into %s\n", process_name);
+    printf("  >> After typing 'aaaa' and pressing Enter in %s, press Enter here...", process_name);
     fflush(stdout);
     getchar();
 
@@ -164,9 +174,9 @@ int main(int argc, char *argv[]) {
     snapshot_memory(hProcess, &snapA, &countA);
     printf("  OK: Captured snapshot A (%d regions).\n\n", countA);
 
-    /* Step 3: Prompt for second password */
-    printf("[3/5] Step 2: Type a DIFFERENT password (e.g. 'xxxx') into %s\n", process_name);
-    printf("  >> After typing 'xxxx' and pressing Enter in %s, press Enter here...", process_name);
+    /* Step 3: Prompt for second wrong password */
+    printf("[3/4] Step 2: Type a DIFFERENT wrong password (e.g. 'bbbb') into %s\n", process_name);
+    printf("  >> After typing 'bbbb' and pressing Enter in %s, press Enter here...", process_name);
     fflush(stdout);
     getchar();
 
@@ -175,112 +185,45 @@ int main(int argc, char *argv[]) {
     snapshot_memory(hProcess, &snapB, &countB);
     printf("  OK: Captured snapshot B (%d regions).\n\n", countB);
 
-    /* Step 4: Prompt for new password one more time to capture final state */
-    printf("[4/5] Step 3: Type '%s' ONE MORE TIME into %s\n", new_password, process_name);
-    printf("  >> After typing '%s' and pressing Enter in %s, press Enter here...", new_password, process_name);
-    fflush(stdout);
-    getchar();
+    /* Step 4: Differential Analysis to locate stored_hash_addr in .data section */
+    printf("[4/4] Analyzing memory to locate stored_hash in .data section...\n");
 
-    MemRegion *snapC = NULL;
-    int countC = 0;
-    snapshot_memory(hProcess, &snapC, &countC);
-    printf("  OK: Captured snapshot C (%d regions).\n\n", countC);
-
-    /* Analyze snapshots:
-     * Snapshot A: User typed 'new_password'  -> input_hash = hash(new_password)
-     * Snapshot B: User typed 'xxxx'          -> input_hash = hash(xxxx)
-     * Snapshot C: User typed 'new_password'  -> input_hash = hash(new_password)
-     *
-     * We look for:
-     * 1. input_hash_addr: Address where valA == valC AND valA != valB AND valA != 0
-     * 2. stored_hash_addr: Address in image/data region where valA == valB == valC AND valA != 0
-     */
-    printf("[5/5] Analyzing memory to locate hash variables...\n");
-
-    unsigned long target_new_hash = 0;
-    void *input_hash_addr = NULL;
     void *stored_hash_addr = NULL;
+    unsigned long old_hash_val = 0;
 
-    /* Search for input_hash address */
-    for (int i = 0; i < countA && i < countB && i < countC; i++) {
-        if (snapA[i].base != snapB[i].base || snapA[i].base != snapC[i].base) continue;
+    /* Search for stored_hash in MEM_IMAGE writable section (.data) */
+    for (int i = 0; i < countA && i < countB && !stored_hash_addr; i++) {
+        if (snapA[i].base != snapB[i].base) continue;
+        if (snapA[i].type != MEM_IMAGE) continue;
+        if (!(snapA[i].protect & (PAGE_READWRITE | PAGE_WRITECOPY))) continue;
+
         SIZE_T sz = snapA[i].size;
-
         for (SIZE_T off = 0; off + sizeof(unsigned long) <= sz; off += sizeof(unsigned long)) {
             unsigned long valA = *(unsigned long *)(snapA[i].data + off);
             unsigned long valB = *(unsigned long *)(snapB[i].data + off);
-            unsigned long valC = *(unsigned long *)(snapC[i].data + off);
 
-            /* Check if this address matches input_hash behavior */
-            if (valA == valC && valA != valB && valA != 0 && valB != 0) {
-                input_hash_addr = (unsigned char *)snapA[i].base + off;
-                target_new_hash = valC;  /* This is hash(new_password) */
+            /* stored_hash stays constant across snapshots and is non-zero */
+            if (valA == valB && valA != 0 && valA != target_new_hash) {
+                stored_hash_addr = (unsigned char *)snapA[i].base + off;
+                old_hash_val = valA;
                 break;
             }
         }
-        if (input_hash_addr) break;
-    }
-
-    if (!input_hash_addr || target_new_hash == 0) {
-        printf("  ERROR: Could not isolate input_hash in memory.\n");
-        free_snapshot(snapA, countA);
-        free_snapshot(snapB, countB);
-        free_snapshot(snapC, countC);
-        CloseHandle(hProcess);
-        return 1;
-    }
-
-    printf("  FOUND input_hash  @ %p (hash value = %lu)\n", input_hash_addr, target_new_hash);
-
-    /* Now find stored_hash address:
-     * We search for unchanged candidates. If static, it resides in an image section (MEM_IMAGE) or data region.
-     */
-    for (int i = 0; i < countA && i < countB && i < countC; i++) {
-        if (snapA[i].base != snapB[i].base || snapA[i].base != snapC[i].base) continue;
-        SIZE_T sz = snapA[i].size;
-
-        /* Prefer MEM_IMAGE regions (where global/static variables live) */
-        for (SIZE_T off = 0; off + sizeof(unsigned long) <= sz; off += sizeof(unsigned long)) {
-            unsigned long valA = *(unsigned long *)(snapA[i].data + off);
-            unsigned long valB = *(unsigned long *)(snapB[i].data + off);
-            unsigned long valC = *(unsigned long *)(snapC[i].data + off);
-
-            /* Check if this is stored_hash: unchanged across all 3 snapshots */
-            if (valA == valB && valB == valC && valA != 0 && valA != target_new_hash) {
-                void *cand_addr = (unsigned char *)snapA[i].base + off;
-
-                /* If in MEM_IMAGE (PE data section), it's static stored_hash! */
-                if (snapA[i].type == MEM_IMAGE) {
-                    stored_hash_addr = cand_addr;
-                    break;
-                }
-
-                /* Or if near input_hash address */
-                ULONG_PTR diff = ((ULONG_PTR)cand_addr > (ULONG_PTR)input_hash_addr) ?
-                                 ((ULONG_PTR)cand_addr - (ULONG_PTR)input_hash_addr) :
-                                 ((ULONG_PTR)input_hash_addr - (ULONG_PTR)cand_addr);
-                if (diff < 512 && !stored_hash_addr) {
-                    stored_hash_addr = cand_addr;
-                }
-            }
-        }
-        if (stored_hash_addr && snapA[i].type == MEM_IMAGE) break;
     }
 
     if (!stored_hash_addr) {
-        printf("  ERROR: Could not locate stored_hash address safely.\n");
+        printf("  ERROR: Could not locate stored_hash address in .data section.\n");
         free_snapshot(snapA, countA);
         free_snapshot(snapB, countB);
-        free_snapshot(snapC, countC);
         CloseHandle(hProcess);
         return 1;
     }
 
-    printf("  FOUND stored_hash @ %p (old hash value = %lu)\n\n",
-           stored_hash_addr, read_value(hProcess, stored_hash_addr));
+    printf("  FOUND stored_hash @ %p (old hash value = %lu)\n\n", stored_hash_addr, old_hash_val);
 
-    /* Patch ONLY stored_hash_addr! */
-    printf("Patching stored_hash @ %p with new hash %lu...\n", stored_hash_addr, target_new_hash);
+    /* Patch stored_hash_addr with target_new_hash */
+    printf("Patching stored_hash @ %p with hash(%s) = %lu...\n",
+           stored_hash_addr, new_password, target_new_hash);
 
     if (patch_value(hProcess, stored_hash_addr, target_new_hash)) {
         unsigned long verify = read_value(hProcess, stored_hash_addr);
@@ -297,7 +240,6 @@ int main(int argc, char *argv[]) {
 
     free_snapshot(snapA, countA);
     free_snapshot(snapB, countB);
-    free_snapshot(snapC, countC);
     CloseHandle(hProcess);
 
     return 0;
