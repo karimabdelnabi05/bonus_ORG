@@ -107,13 +107,13 @@ ALL TESTS PASSED
 
 ## 5. Comparison of Approaches
 
-| Criteria | Programmatic (`patcher.exe`) | Manual GUI (Cheat Engine) |
+| Criteria | Programmatic (`patcher.exe`) | Manual GUI (Cheat Engine / x64dbg) |
 |---|---|---|
-| **Automation** | 100% automated scriptable CLI | Manual mouse/keyboard workflow |
+| **Automation** | 100% automated scriptable CLI | Manual interactive workflow |
 | **Speed** | Instant (<50ms execution) | Requires manual scan & edit (~1-2 minutes) |
-| **ASLR Resilience** | Built-in via dynamic `VirtualQueryEx` scan | Manual scan per session |
-| **Dependencies** | Standard Win32 API (`kernel32.dll`) | Requires installing Cheat Engine |
-| **Educational Value** | Deep understanding of Win32 process memory internal APIs | Interactive visual memory inspection |
+| **ASLR Resilience** | Built-in via dynamic `VirtualQueryEx` scan | Manual search/pattern match per session |
+| **Dependencies** | Standard Win32 API (`kernel32.dll`) | Requires standalone GUI tools (Cheat Engine / x64dbg) |
+| **Educational Value** | Deep understanding of Win32 process memory internal APIs | Interactive visual memory inspection & disassembly analysis |
 
 ---
 
