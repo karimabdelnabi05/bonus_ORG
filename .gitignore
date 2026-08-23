@@ -1,0 +1,19 @@
+# Build output
+build/
+
+# Object files
+*.o
+*.obj
+
+# Executables (keep source, ignore built binaries)
+*.exe
+
+# Editor/IDE files
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+Thumbs.db
+.DS_Store
