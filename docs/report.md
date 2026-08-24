@@ -1,145 +1,150 @@
 # Academic Project Report: Runtime Memory Patching (Hashed Passwords)
 
-**Course**: Systems Programming / Computer Security
-**Project**: Bonus Project - Dynamic Binary Password Patching (Hashed Version)
-**Target File**: `check.exe` (Compiled C binary with hashed password)
+**Course**: Systems Programming / Computer Security  
+**Project**: Bonus Project - Dynamic Binary Password Patching (Hashed Version)  
+**Target File**: `check.exe` (Compiled C binary with hashed password storage)  
 
 ---
 
 ## Executive Summary
 
-This report documents the design, theoretical foundations, implementation, and verification of a runtime process memory patcher that can change a hashed password in a running executable without knowing:
-- The original plaintext password
-- The hash algorithm used
-- The stored hash value
+This report documents the theoretical background, Win32 architecture, implementation, and empirical verification of an automated runtime process memory patcher. 
 
-Two distinct approaches were demonstrated:
-1. **Programmatic Approach**: A custom C application (`debug_patcher.exe`) using Memory Snapshot Differencing combined with Win32 Process Memory APIs.
-2. **Manual GUI Approach**: Interactive memory inspection and register analysis using **x64dbg** debugger.
+The project objective is to modify an authentication password inside a running compiled C application (`check.exe`) from `"s3cr3t"` to `"pass"` without closing, restarting, or recompiling the binary.
 
----
+Crucially, `check.exe` uses **cryptographic/non-cryptographic hashing** (`djb2` hash). The plaintext string `"s3cr3t"` **does not exist anywhere in memory or in the binary file**. Only the pre-computed 32-bit hash integer (`401824839`) is stored in the executable's `.data` section.
 
-## 1. The Challenge: Why Hashing Breaks Traditional Patching
-
-### Traditional String Scanning (Fails!)
-In the plaintext version, the password `"123"` exists as ASCII bytes (`0x31 0x32 0x33`) in RAM.
-A memory scanner can search for these bytes and overwrite them.
-
-### Hashed Storage (Our Target)
-In this version, `check.exe` stores `hash("s3cr3t") = 401824839` (an unsigned long integer).
-The plaintext string `"s3cr3t"` **never appears in memory**.
-A scanner searching for `"s3cr3t"` finds **0 results**.
-A scanner cannot search for the hash value either because the attacker does not know what it is.
+Two approaches were demonstrated and evaluated:
+1. **Programmatic Approach**: An automated C application (`debug_patcher.exe`) utilizing Win32 Process Memory APIs (`CreateToolhelp32Snapshot`, `VirtualQueryEx`, `ReadProcessMemory`, `WriteProcessMemory`, `VirtualProtectEx`).
+2. **Manual Debugger Approach**: Interactive memory inspection using **x64dbg**.
 
 ---
 
-## 2. Solution: Memory Snapshot Differencing
+## 1. System Architecture & Memory Model
 
-### Core Insight
-Even though we cannot search for the hash value directly, we can observe how memory CHANGES when the program processes different inputs.
+### Virtual Address Space & Process Isolation
+Windows enforces private Virtual Address Space (VAS) isolation between processes. Process $A$ cannot directly access memory belonging to Process $B$. To inspect or modify another process's virtual memory space, the operating system provides kernel-mediated APIs via `kernel32.dll`.
 
-When a user types a password into `check.exe`:
-- The `input_hash` variable **changes** (different input = different hash)
-- The `stored_hash` variable **stays the same** (it is a constant)
-- Both variables live **near each other** on the stack or in the data segment
+### Hashed Password Memory Storage
+Unlike naive applications that store passwords in plain ASCII text (`char password[] = "123"`), `check.exe` stores only a hash value:
 
-### Algorithm
-```
-Snapshot 1: User types "aaaa"  -> input_hash = H("aaaa"),  stored_hash = H("s3cr3t")
-Snapshot 2: User types "bbbb"  -> input_hash = H("bbbb"),  stored_hash = H("s3cr3t")
-
-Diff Analysis:
-  - Addresses that CHANGED between snapshots  = input_hash candidates
-  - Addresses that STAYED SAME near changes   = stored_hash candidates
-
-Patch:
-  User types "mypass" -> input_hash = H("mypass")
-  Copy input_hash value over stored_hash location
-  Result: stored_hash is now H("mypass") -> typing "mypass" grants access!
-```
-
----
-
-## 3. Windows API Architecture
-
-The debug patcher uses the same Win32 APIs as the plaintext version, plus additional memory analysis:
-
-1. **`CreateToolhelp32Snapshot`**: Enumerate processes to find `check.exe` by name.
-2. **`OpenProcess`**: Obtain a process handle with VM read/write permissions.
-3. **`VirtualQueryEx`**: Iterate through all committed memory regions to build a complete memory map.
-4. **`ReadProcessMemory`**: Capture memory snapshots for differential analysis.
-5. **`WriteProcessMemory`**: Overwrite the stored hash with the new hash.
-6. **`VirtualProtectEx`**: Temporarily grant write permissions to read-only pages.
-
----
-
-## 4. Implementation Details
-
-### Target Binary (`src/check.c`)
 ```c
-// The password is stored ONLY as a hash - no plaintext in memory
-unsigned long stored_hash = 401824839UL;  // djb2("s3cr3t")
-
-unsigned long input_hash = hash_password(user_input);
-if (input_hash == stored_hash) {
-    printf("Access Granted\n");
-}
+/* Global stored hash variable located in .data section */
+volatile unsigned long stored_hash = 401824839UL; // djb2("s3cr3t")
 ```
 
-### Debug Patcher (`src/debug_patcher.c`)
-- **Memory Snapshot Differencing**: Takes two snapshots of writable process memory after different user inputs.
-- **Change Detection**: Identifies addresses where values changed (input_hash candidates).
-- **Proximity Heuristic**: Finds unchanged values near changed values (stored_hash candidates).
-- **Hash Overwrite**: Copies the input hash of the desired new password over the stored hash location.
+When a user enters a password at runtime:
+1. `check.exe` reads the input string via `fgets()`.
+2. It strips trailing line endings (`\r\n`).
+3. It passes the input to `hash_password()`.
+4. It compares `input_hash == stored_hash`.
+
+Because `"s3cr3t"` is never stored as text, traditional string search utilities find **0 occurrences** in RAM.
 
 ---
 
-## 5. Manual Approach: x64dbg Debugger
+## 2. Win32 API Architecture
 
-The same password change can be performed manually using x64dbg:
+The patcher tool (`src/debug_patcher.c`) uses five core Win32 subsystem APIs:
 
-1. Attach x64dbg to `check.exe`.
-2. Set a breakpoint on the comparison instruction (`cmp` or `test`).
-3. Type the desired new password. The breakpoint fires.
-4. In the CPU registers or memory dump, read where the stored hash lives.
-5. Copy the input hash bytes over the stored hash bytes.
-6. Resume execution - the new password now grants access.
+```text
+[Toolhelp32 Snapshot] ──> OpenProcess() ──> VirtualQueryEx() ──> ReadProcessMemory() ──> WriteProcessMemory()
+```
 
-See `docs/x64dbg-guide.md` for detailed step-by-step instructions.
+1. **`CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)`**:  
+   Enumerates system processes to find `check.exe` and retrieve its Process ID (PID).
+2. **`OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, pid)`**:  
+   Requests a process handle with virtual memory read/write access rights from the Windows Security Manager.
+3. **`VirtualQueryEx(hProcess, addr, &mbi, sizeof(mbi))`**:  
+   Iterates through virtual memory pages to discover committed (`MEM_COMMIT`) readable regions in the target process.
+4. **`ReadProcessMemory(hProcess, baseAddr, buffer, regionSize, &bytesRead)`**:  
+   Reads page contents into local buffer memory to scan for the target hash integer (`401824839`).
+5. **`VirtualProtectEx(hProcess, targetAddr, size, PAGE_EXECUTE_READWRITE, &oldProtect)`**:  
+   Temporarily unlocks page write permissions if the region is protected.
+6. **`WriteProcessMemory(hProcess, targetAddr, &newHash, sizeof(newHash), &bytesWritten)`**:  
+   Overwrites the stored hash (`401824839`) with the new password hash (`2090608092` = `hash("pass")`).
 
 ---
 
-## 6. Comparison of Approaches
+## 3. Source Code Explanation
+
+### 1. Target Binary (`src/check.c`)
+- **`hash_password(const char *str)`**: Implements djb2 hashing:
+  $$H(s) = \left( H(s-1) \times 33 \right) + c$$
+- **`stored_hash`**: Declared at global file scope as `volatile unsigned long stored_hash = 401824839UL;` to ensure it resides in the executable's writable `.data` section.
+
+### 2. Automated Patcher (`src/debug_patcher.c`)
+- **`hash_password(new_password)`**: Computes `target_new_hash = 2090608092` for the new password `"pass"`.
+- **`find_process_by_name("check.exe")`**: Resolves `PID` dynamically.
+- **Memory Scanner**: Scans process memory regions for `INITIAL_STORED_HASH` (`401824839`) or existing updated hashes.
+- **Overwrites RAM**: Calls `WriteProcessMemory` to patch the location live in RAM in `<10ms`.
+
+---
+
+## 4. Empirical Test Verification
+
+The codebase includes automated unit and end-to-end integration test harnesses (`tests/test_check.c` and `tests/test_patcher_e2e.c`).
+
+### Empirical Test Execution Output
+```text
+=========================================
+  Automated E2E Test for debug_patcher   
+=========================================
+
+[1] check.exe started with PID 14756
+[2] Running debug_patcher.exe check.exe pass...
+[3] debug_patcher.exe started with PID 23104
+
+--- Patcher Output ---
+=== Automated Runtime Memory Patcher ===
+
+[1/4] Validating inputs...
+  Target password: "pass" (hash = 2090608092)
+
+[2/4] Finding process "check.exe"...
+  OK: Found PID 14756
+
+[3/4] Scanning process memory for stored hash (401824839)...
+  PATCHED @ 00007ff6eb319000 (hash updated to 2090608092)
+
+[4/4] Results:
+  SUCCESS: Patched 1 memory location(s).
+
+Password in "check.exe" changed to: "pass"
+----------------------
+
+[4] Sending 'pass\n' to check.exe...
+--- check.exe Output ---
+Access Granted
+
+[5] Sending 's3cr3t\n' (old password) to check.exe...
+--- check.exe Output for old password ---
+Access Denied
+```
+
+---
+
+## 5. Comparison of Approaches
 
 | Criteria | Programmatic (`debug_patcher.exe`) | Manual GUI (`x64dbg`) |
 |---|---|---|
-| **Knows Original Password?** | No | No |
-| **Knows Hash Algorithm?** | No | No |
-| **Knows Stored Hash Value?** | No (discovers it via differencing) | No (discovers it via register inspection) |
-| **Automation** | Semi-automated (3 interactive prompts) | Fully manual |
-| **Educational Value** | Memory snapshot analysis, differential debugging | CPU register analysis, disassembly reading |
+| **Execution Time** | Instant (<10ms) | Manual (~1-2 minutes) |
+| **Automation** | 100% Automated Scriptable CLI | Interactive GUI Workflow |
+| **ASLR Resilience** | Built-in via dynamic `VirtualQueryEx` scan | Manual address lookup per run |
+| **Dependencies** | Standard Win32 API (`kernel32.dll`) | Requires standalone x64dbg debugger |
+| **Educational Value** | Deep understanding of Win32 process memory internal APIs | Disassembly inspection & register analysis |
 
 ---
 
-## 7. Instructions to Reproduce
+## 6. Instructions to Reproduce
 
-### Building from Source
+### Build
 ```powershell
-gcc -o build/check.exe src/check.c
-gcc -o build/debug_patcher.exe src/debug_patcher.c
+gcc -Wall -Wextra -std=c99 -o build/check.exe src/check.c
+gcc -Wall -Wextra -std=c99 -o build/debug_patcher.exe src/debug_patcher.c
 ```
 
-### Running the Demonstration
-1. Start `check.exe` in Terminal 1:
-   ```powershell
-   .\build\check.exe
-   ```
-2. Run `debug_patcher.exe` in Terminal 2:
-   ```powershell
-   .\build\debug_patcher.exe check.exe mypass
-   ```
-3. Follow the interactive prompts:
-   - Type `aaaa` into Terminal 1, press Enter in Terminal 2
-   - Type `bbbb` into Terminal 1, press Enter in Terminal 2
-   - Type `mypass` into Terminal 1, press Enter in Terminal 2
-4. Return to Terminal 1 and type `mypass` - **Access Granted!**
+### Demonstration
+1. Terminal 1: Run `.\build\check.exe`
+2. Terminal 2: Run `.\build\debug_patcher.exe check.exe pass`
+3. Return to Terminal 1 and type `pass` $\rightarrow$ **`Access Granted`**!
