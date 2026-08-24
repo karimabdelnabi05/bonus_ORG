@@ -10,6 +10,10 @@ int main(void) {
     printf("  Automated E2E Test for debug_patcher   \n");
     printf("=========================================\n\n");
 
+    /* Stop existing check.exe */
+    system("taskkill /F /IM check.exe 2>NUL");
+    Sleep(300);
+
     /* 1. Start check.exe in background */
     STARTUPINFOA siCheck;
     PROCESS_INFORMATION piCheck;
@@ -41,29 +45,18 @@ int main(void) {
     printf("[1] check.exe started with PID %lu\n", piCheck.dwProcessId);
     Sleep(500);
 
-    DWORD written;
-
-    /* Step 1 for check.exe: send 'aaaa' */
-    printf("[2] Sending 'aaaa\\n' to check.exe...\n");
-    WriteFile(hCheckStdinWr, "aaaa\n", 5, &written, NULL);
-    Sleep(300);
-
-    /* Start debug_patcher.exe check.exe pass */
+    /* 2. Run debug_patcher.exe check.exe pass */
+    printf("[2] Running debug_patcher.exe check.exe pass...\n");
     STARTUPINFOA siPatcher;
     PROCESS_INFORMATION piPatcher;
     ZeroMemory(&siPatcher, sizeof(siPatcher));
     siPatcher.cb = sizeof(siPatcher);
-
-    HANDLE hPatcherStdinRd, hPatcherStdinWr;
-    CreatePipe(&hPatcherStdinRd, &hPatcherStdinWr, &sa, 0);
-    SetHandleInformation(hPatcherStdinWr, HANDLE_FLAG_INHERIT, 0);
 
     HANDLE hPatcherStdoutRd, hPatcherStdoutWr;
     CreatePipe(&hPatcherStdoutRd, &hPatcherStdoutWr, &sa, 0);
     SetHandleInformation(hPatcherStdoutRd, HANDLE_FLAG_INHERIT, 0);
 
     siPatcher.dwFlags = STARTF_USESTDHANDLES;
-    siPatcher.hStdInput = hPatcherStdinRd;
     siPatcher.hStdOutput = hPatcherStdoutWr;
     siPatcher.hStdError = hPatcherStdoutWr;
 
@@ -72,26 +65,10 @@ int main(void) {
         return 1;
     }
     printf("[3] debug_patcher.exe started with PID %lu\n", piPatcher.dwProcessId);
-    Sleep(500);
 
-    /* Patcher Step 1 Enter */
-    printf("[4] Sending Enter to patcher (Step 1)... \n");
-    WriteFile(hPatcherStdinWr, "\n", 1, &written, NULL);
-    Sleep(500);
-
-    /* Step 2 for check.exe: send 'bbbb' */
-    printf("[5] Sending 'bbbb\\n' to check.exe...\n");
-    WriteFile(hCheckStdinWr, "bbbb\n", 5, &written, NULL);
-    Sleep(300);
-
-    /* Patcher Step 2 Enter */
-    printf("[6] Sending Enter to patcher (Step 2)... \n");
-    WriteFile(hPatcherStdinWr, "\n", 1, &written, NULL);
-
-    /* Wait for patcher to finish */
+    /* Wait for patcher to complete */
     WaitForSingleObject(piPatcher.hProcess, 5000);
 
-    /* Read patcher output */
     char patcherOut[4096] = {0};
     DWORD readBytes = 0;
     PeekNamedPipe(hPatcherStdoutRd, NULL, 0, NULL, &readBytes, NULL);
@@ -100,14 +77,15 @@ int main(void) {
         printf("\n--- Patcher Output ---\n%s\n----------------------\n\n", patcherOut);
     }
 
-    /* Clear check.exe stdout buffer */
+    /* Clear check.exe pipe buffer */
     char junk[4096];
     while (PeekNamedPipe(hCheckStdoutRd, NULL, 0, NULL, &readBytes, NULL) && readBytes > 0) {
         ReadFile(hCheckStdoutRd, junk, sizeof(junk) - 1, &readBytes, NULL);
     }
 
-    /* Now send 'pass\n' to check.exe to verify Access Granted! */
-    printf("[7] Verifying patched check.exe with 'pass\\n'...\n");
+    /* 3. Send "pass\n" to check.exe to verify Access Granted */
+    printf("[4] Sending 'pass\\n' to check.exe...\n");
+    DWORD written;
     WriteFile(hCheckStdinWr, "pass\n", 5, &written, NULL);
     Sleep(500);
 
@@ -116,6 +94,18 @@ int main(void) {
     if (readBytes > 0) {
         ReadFile(hCheckStdoutRd, checkOut, sizeof(checkOut) - 1, &readBytes, NULL);
         printf("\n--- check.exe Output ---\n%s\n------------------------\n\n", checkOut);
+    }
+
+    /* 4. Send "s3cr3t\n" to check.exe to verify Access Denied */
+    printf("[5] Sending 's3cr3t\\n' (old password) to check.exe...\n");
+    WriteFile(hCheckStdinWr, "s3cr3t\n", 7, &written, NULL);
+    Sleep(500);
+
+    ZeroMemory(checkOut, sizeof(checkOut));
+    PeekNamedPipe(hCheckStdoutRd, NULL, 0, NULL, &readBytes, NULL);
+    if (readBytes > 0) {
+        ReadFile(hCheckStdoutRd, checkOut, sizeof(checkOut) - 1, &readBytes, NULL);
+        printf("\n--- check.exe Output for old password ---\n%s\n-----------------------------------------\n\n", checkOut);
     }
 
     TerminateProcess(piCheck.hProcess, 0);
