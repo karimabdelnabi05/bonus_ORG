@@ -7,9 +7,13 @@
 
 int main(void) {
     printf("====================================================\n");
-    printf("  Automated Test: Mode 2 Zero-Knowledge Patcher     \n");
-    printf("  Target: check_mystery.exe (Unknown Hash)           \n");
+    printf("  Automated Test: TRUE Algorithm-Blind Patcher      \n");
+    printf("  Target: check_mystery.exe (Unknown Hash & Algo)    \n");
     printf("====================================================\n\n");
+
+    /* Stop existing processes */
+    system("taskkill /F /IM check_mystery.exe 2>NUL");
+    Sleep(300);
 
     /* 1. Start check_mystery.exe */
     STARTUPINFOA siCheck;
@@ -49,8 +53,8 @@ int main(void) {
     WriteFile(hCheckStdinWr, "aaaa\n", 5, &written, NULL);
     Sleep(300);
 
-    /* 2. Run debug_patcher.exe check_mystery.exe pass --diff */
-    printf("[3] Starting debug_patcher.exe check_mystery.exe pass --diff...\n");
+    /* 2. Run debug_patcher.exe check_mystery.exe pass */
+    printf("[3] Starting debug_patcher.exe check_mystery.exe pass...\n");
     STARTUPINFOA siPatcher;
     PROCESS_INFORMATION piPatcher;
     ZeroMemory(&siPatcher, sizeof(siPatcher));
@@ -69,7 +73,7 @@ int main(void) {
     siPatcher.hStdOutput = hPatcherStdoutWr;
     siPatcher.hStdError = hPatcherStdoutWr;
 
-    if (!CreateProcessA("build\\debug_patcher.exe", "build\\debug_patcher.exe check_mystery.exe pass --diff", NULL, NULL, TRUE, 0, NULL, NULL, &siPatcher, &piPatcher)) {
+    if (!CreateProcessA("build\\debug_patcher.exe", "build\\debug_patcher.exe check_mystery.exe pass", NULL, NULL, TRUE, 0, NULL, NULL, &siPatcher, &piPatcher)) {
         printf("FAILED to start debug_patcher.exe\n");
         return 1;
     }
@@ -89,6 +93,16 @@ int main(void) {
     /* Patcher Step 2 Enter */
     printf("[7] Sending Enter to patcher (Step 2)... \n");
     WriteFile(hPatcherStdinWr, "\n", 1, &written, NULL);
+    Sleep(500);
+
+    /* Step 3 for check_mystery.exe: send 'pass' FIRST */
+    printf("[8] Sending 'pass\\n' to check_mystery.exe...\n");
+    WriteFile(hCheckStdinWr, "pass\n", 5, &written, NULL);
+    Sleep(300);
+
+    /* Patcher Step 3 Enter */
+    printf("[9] Sending Enter to patcher (Step 3)... \n");
+    WriteFile(hPatcherStdinWr, "\n", 1, &written, NULL);
 
     /* Wait for patcher to complete */
     WaitForSingleObject(piPatcher.hProcess, 5000);
@@ -98,7 +112,7 @@ int main(void) {
     PeekNamedPipe(hPatcherStdoutRd, NULL, 0, NULL, &readBytes, NULL);
     if (readBytes > 0) {
         ReadFile(hPatcherStdoutRd, patcherOut, sizeof(patcherOut) - 1, &readBytes, NULL);
-        printf("\n--- Patcher Output (Mode 2) ---\n%s\n-------------------------------\n\n", patcherOut);
+        printf("\n--- Patcher Output (Algorithm-Blind) ---\n%s\n----------------------------------------\n\n", patcherOut);
     }
 
     /* Clear stdout pipe buffer */
@@ -108,7 +122,7 @@ int main(void) {
     }
 
     /* 3. Send "pass\n" to check_mystery.exe to verify Access Granted */
-    printf("[8] Verifying patched check_mystery.exe with 'pass\\n'...\n");
+    printf("[10] Verifying patched check_mystery.exe with 'pass\\n'...\n");
     WriteFile(hCheckStdinWr, "pass\n", 5, &written, NULL);
     Sleep(500);
 

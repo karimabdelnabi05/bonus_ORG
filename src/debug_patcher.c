@@ -1,16 +1,24 @@
 /*
- * debug_patcher.c - Runtime Password Patcher for Hashed Passwords
+ * debug_patcher.c - TRUE Zero-Knowledge Algorithm-Blind Memory Patcher
  *
- * Supports TWO operational modes:
+ * This patcher requires ZERO KNOWLEDGE of:
+ *   1. The original password string ("s3cr3t")
+ *   2. The initial stored hash value (401824839)
+ *   3. The hash algorithm used by the target program (djb2, SHA-256, MD5, custom, etc.)
  *
- *   MODE 1: Direct Value Search (Default - Instant <10ms)
- *     - Usage:  .\build\debug_patcher.exe check.exe pass
- *     - Scans RAM for the known initial stored hash (401824839) in check.exe's .data section.
+ * Strategy (Pure Differential Memory Interception):
+ *   - Step 1: Takes Snapshot A after user types 'aaaa'.
+ *   - Step 2: Takes Snapshot B after user types 'bbbb'.
+ *   - Step 3: Takes Snapshot C after user types desired <new_password> (e.g., 'pass').
  *
- *   MODE 2: Zero-Knowledge Differential Search (--diff flag)
- *     - Usage:  .\build\debug_patcher.exe check.exe pass --diff
- *     - Takes 2 RAM snapshots after different inputs ("aaaa" vs "bbbb").
- *     - Finds the stored_hash address automatically without knowing initial hash value (401824839).
+ * Memory Analysis:
+ *   - input_hash_addr: Memory location where value CHANGED between snapshot A & B,
+ *                      and matched snapshot C (the input hash calculated BY check.exe).
+ *   - stored_hash_addr: Memory location in executable's .data section that stayed UNCHANGED.
+ *
+ * Patch:
+ *   - Reads the hash of <new_password> calculated BY check.exe at input_hash_addr.
+ *   - Copies that hash value over stored_hash_addr in .data section.
  *
  * Compile: gcc -o debug_patcher.exe src/debug_patcher.c
  */
@@ -24,19 +32,19 @@
 #include <windows.h>
 #include <tlhelp32.h>
 
-#define INITIAL_STORED_HASH 401824839UL
-
-/* djb2 hash function matching check.c */
-static unsigned long hash_password(const char *str) {
-    unsigned long hash = 5381;
-    int c;
-    while ((c = *str++)) {
-        hash = ((hash << 5) + hash) + c;
-    }
-    return hash;
+/* Helper to filter out raw 4-byte ASCII text buffers like "pass" or "xxxx" */
+static int is_ascii_dword(unsigned long val) {
+    unsigned char b1 = (val) & 0xFF;
+    unsigned char b2 = (val >> 8) & 0xFF;
+    unsigned char b3 = (val >> 16) & 0xFF;
+    unsigned char b4 = (val >> 24) & 0xFF;
+    return (b1 >= 0x20 && b1 <= 0x7E) &&
+           (b2 >= 0x20 && b2 <= 0x7E) &&
+           (b3 >= 0x20 && b3 <= 0x7E) &&
+           (b4 >= 0x20 && b4 <= 0x7E);
 }
 
-/* Find PID of a running process by executable name */
+/* Find PID of target process */
 static DWORD find_process_by_name(const char *name) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return 0;
@@ -57,7 +65,7 @@ static DWORD find_process_by_name(const char *name) {
     return 0;
 }
 
-/* Patch a single unsigned long at a target address */
+/* Patch an unsigned long at a target memory address */
 static int patch_value(HANDLE hProcess, void *target_addr, unsigned long new_value) {
     DWORD old_protect;
     if (!VirtualProtectEx(hProcess, target_addr, sizeof(unsigned long), PAGE_EXECUTE_READWRITE, &old_protect)) {
@@ -71,6 +79,14 @@ static int patch_value(HANDLE hProcess, void *target_addr, unsigned long new_val
     return ok && (bytes_written == sizeof(unsigned long));
 }
 
+/* Read an unsigned long from a memory address */
+static unsigned long read_value(HANDLE hProcess, void *addr) {
+    unsigned long val = 0;
+    SIZE_T bytes_read = 0;
+    ReadProcessMemory(hProcess, addr, &val, sizeof(unsigned long), &bytes_read);
+    return val;
+}
+
 typedef struct {
     void *base;
     SIZE_T size;
@@ -79,7 +95,7 @@ typedef struct {
     DWORD type;
 } MemRegion;
 
-/* Read all committed memory regions */
+/* Capture memory snapshot of committed regions */
 static int snapshot_memory(HANDLE hProcess, MemRegion **regions, int *count) {
     *count = 0;
     int capacity = 256;
@@ -125,128 +141,18 @@ static void free_snapshot(MemRegion *regions, int count) {
     free(regions);
 }
 
-/* Mode 1: Direct Value Search */
-static int run_mode_1_direct(HANDLE hProcess, const char *process_name, const char *new_password, unsigned long new_hash) {
-    printf("[MODE 1: Direct Search]\n");
-    printf("Scanning process memory for initial hash (%lu)...\n", INITIAL_STORED_HASH);
-
-    MEMORY_BASIC_INFORMATION mbi;
-    unsigned char *scan_addr = NULL;
-    int patched_count = 0;
-
-    while (VirtualQueryEx(hProcess, scan_addr, &mbi, sizeof(mbi))) {
-        if (mbi.State == MEM_COMMIT &&
-            (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY | PAGE_READONLY | PAGE_EXECUTE_READ)) &&
-            !(mbi.Protect & PAGE_GUARD) &&
-            !(mbi.Protect & PAGE_NOACCESS) &&
-            mbi.RegionSize < 10 * 1024 * 1024) {
-
-            unsigned char *buf = (unsigned char *)malloc(mbi.RegionSize);
-            SIZE_T br = 0;
-
-            if (ReadProcessMemory(hProcess, mbi.BaseAddress, buf, mbi.RegionSize, &br) && br >= sizeof(unsigned long)) {
-                for (SIZE_T off = 0; off + sizeof(unsigned long) <= br; off += 4) {
-                    unsigned long *val_ptr = (unsigned long *)(buf + off);
-
-                    if (*val_ptr == INITIAL_STORED_HASH) {
-                        void *target_addr = (unsigned char *)mbi.BaseAddress + off;
-                        if (patch_value(hProcess, target_addr, new_hash)) {
-                            printf("  PATCHED @ %p (stored_hash updated to %lu)\n", target_addr, new_hash);
-                            patched_count++;
-                        }
-                    }
-                }
-            }
-            free(buf);
-        }
-        scan_addr = (unsigned char *)mbi.BaseAddress + mbi.RegionSize;
-        if ((ULONG_PTR)scan_addr < (ULONG_PTR)mbi.BaseAddress) break;
-    }
-
-    if (patched_count > 0) {
-        printf("\nSUCCESS: Password in \"%s\" changed to \"%s\"!\n", process_name, new_password);
-        return 0;
-    } else {
-        printf("\nFAILED: Could not locate stored hash in memory.\n");
-        return 1;
-    }
-}
-
-/* Mode 2: Zero-Knowledge Differential Snapshot Search */
-static int run_mode_2_diff(HANDLE hProcess, const char *process_name, const char *new_password, unsigned long new_hash) {
-    printf("[MODE 2: Zero-Knowledge Differential Search]\n\n");
-
-    printf("Step 1: Type a WRONG password (e.g. 'aaaa') into %s\n", process_name);
-    printf("  >> After typing 'aaaa' and pressing Enter in %s, press Enter here...", process_name);
-    fflush(stdout);
-    getchar();
-
-    MemRegion *snapA = NULL;
-    int countA = 0;
-    snapshot_memory(hProcess, &snapA, &countA);
-    printf("  OK: Captured Snapshot A (%d regions).\n\n", countA);
-
-    printf("Step 2: Type a DIFFERENT wrong password (e.g. 'bbbb') into %s\n", process_name);
-    printf("  >> After typing 'bbbb' and pressing Enter in %s, press Enter here...", process_name);
-    fflush(stdout);
-    getchar();
-
-    MemRegion *snapB = NULL;
-    int countB = 0;
-    snapshot_memory(hProcess, &snapB, &countB);
-    printf("  OK: Captured Snapshot B (%d regions).\n\n", countB);
-
-    printf("Analyzing RAM differences to locate stored_hash in .data section...\n");
-    void *stored_hash_addr = NULL;
-    unsigned long old_val = 0;
-
-    for (int i = 0; i < countA && i < countB && !stored_hash_addr; i++) {
-        if (snapA[i].base != snapB[i].base) continue;
-        if (snapA[i].type != MEM_IMAGE) continue;
-        if (!(snapA[i].protect & (PAGE_READWRITE | PAGE_WRITECOPY))) continue;
-
-        SIZE_T sz = snapA[i].size;
-        for (SIZE_T off = 0; off + sizeof(unsigned long) <= sz; off += sizeof(unsigned long)) {
-            unsigned long valA = *(unsigned long *)(snapA[i].data + off);
-            unsigned long valB = *(unsigned long *)(snapB[i].data + off);
-
-            if (valA == valB && valA != 0 && valA != new_hash) {
-                stored_hash_addr = (unsigned char *)snapA[i].base + off;
-                old_val = valA;
-                break;
-            }
-        }
-    }
-
-    free_snapshot(snapA, countA);
-    free_snapshot(snapB, countB);
-
-    if (stored_hash_addr) {
-        printf("  FOUND stored_hash @ %p (old hash value = %lu)\n", stored_hash_addr, old_val);
-        if (patch_value(hProcess, stored_hash_addr, new_hash)) {
-            printf("\nSUCCESS: Password in \"%s\" changed to \"%s\"!\n", process_name, new_password);
-            return 0;
-        }
-    }
-
-    printf("\nFAILED: Could not isolate stored hash in RAM.\n");
-    return 1;
-}
-
 int main(int argc, char *argv[]) {
-    if (argc < 3) {
-        printf("Usage:\n");
-        printf("  Mode 1 (Instant): %s <process_name> <new_password>\n", argv[0]);
-        printf("  Mode 2 (Zero-Knowledge Diff): %s <process_name> <new_password> --diff\n", argv[0]);
+    if (argc != 3) {
+        printf("Usage: %s <process_name> <new_password>\n", argv[0]);
+        printf("Example: %s check_mystery.exe pass\n", argv[0]);
         return 1;
     }
 
     const char *process_name = argv[1];
     const char *new_password = argv[2];
-    int use_diff = (argc >= 4 && strcmp(argv[3], "--diff") == 0);
-    unsigned long new_hash = hash_password(new_password);
 
-    printf("=== Runtime Memory Patcher ===\n\n");
+    printf("=== TRUE Algorithm-Blind Memory Patcher ===\n");
+    printf("(No Hash Function - Learns Hash Directly From Target Memory)\n\n");
 
     DWORD pid = find_process_by_name(process_name);
     if (pid == 0) {
@@ -264,13 +170,104 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    int result = 0;
-    if (use_diff) {
-        result = run_mode_2_diff(hProcess, process_name, new_password, new_hash);
-    } else {
-        result = run_mode_1_direct(hProcess, process_name, new_password, new_hash);
+    /* Step 1: Type 'aaaa' into target */
+    printf("[1/4] Step 1: Type a WRONG password (e.g. 'aaaa') into %s\n", process_name);
+    printf("  >> After typing 'aaaa' and pressing Enter in %s, press Enter here...", process_name);
+    fflush(stdout);
+    getchar();
+
+    MemRegion *snapA = NULL;
+    int countA = 0;
+    snapshot_memory(hProcess, &snapA, &countA);
+    printf("  OK: Captured Snapshot A (%d regions).\n\n", countA);
+
+    /* Step 2: Type 'bbbb' into target */
+    printf("[2/4] Step 2: Type a DIFFERENT wrong password (e.g. 'bbbb') into %s\n", process_name);
+    printf("  >> After typing 'bbbb' and pressing Enter in %s, press Enter here...", process_name);
+    fflush(stdout);
+    getchar();
+
+    MemRegion *snapB = NULL;
+    int countB = 0;
+    snapshot_memory(hProcess, &snapB, &countB);
+    printf("  OK: Captured Snapshot B (%d regions).\n\n", countB);
+
+    /* Step 3: Type desired <new_password> into target */
+    printf("[3/4] Step 3: Type your desired NEW password '%s' into %s\n", new_password, process_name);
+    printf("  >> After typing '%s' and pressing Enter in %s, press Enter here...", new_password, process_name);
+    fflush(stdout);
+    getchar();
+
+    MemRegion *snapC = NULL;
+    int countC = 0;
+    snapshot_memory(hProcess, &snapC, &countC);
+    printf("  OK: Captured Snapshot C (%d regions).\n\n", countC);
+
+    /* Step 4: Differential Analysis */
+    printf("[4/4] Analyzing memory to locate variables...\n");
+
+    void *stored_hash_addr = NULL;
+    unsigned long target_new_hash = 0;
+    unsigned long old_hash_val = 0;
+
+    /* Find stored_hash_addr in .data section (constant across snapA, snapB, snapC) */
+    for (int i = 0; i < countA && i < countB && i < countC && !stored_hash_addr; i++) {
+        if (snapA[i].base != snapB[i].base || snapA[i].base != snapC[i].base) continue;
+        if (snapA[i].type != MEM_IMAGE) continue;
+        if (!(snapA[i].protect & (PAGE_READWRITE | PAGE_WRITECOPY))) continue;
+
+        SIZE_T sz = snapA[i].size;
+        for (SIZE_T off = 0; off + sizeof(unsigned long) <= sz; off += sizeof(unsigned long)) {
+            unsigned long valA = *(unsigned long *)(snapA[i].data + off);
+            unsigned long valB = *(unsigned long *)(snapB[i].data + off);
+            unsigned long valC = *(unsigned long *)(snapC[i].data + off);
+
+            if (valA == valB && valB == valC && valA != 0) {
+                stored_hash_addr = (unsigned char *)snapA[i].base + off;
+                old_hash_val = valA;
+                break;
+            }
+        }
     }
 
+    /* Find input_hash value computed BY check.exe inside Snapshot C (skipping ASCII text buffers) */
+    for (int i = 0; i < countA && i < countB && i < countC && target_new_hash == 0; i++) {
+        if (snapA[i].base != snapB[i].base || snapA[i].base != snapC[i].base) continue;
+        if (snapA[i].type != MEM_IMAGE) continue;
+        if (!(snapA[i].protect & (PAGE_READWRITE | PAGE_WRITECOPY))) continue;
+
+        SIZE_T sz = snapA[i].size;
+        for (SIZE_T off = 0; off + sizeof(unsigned long) <= sz; off += sizeof(unsigned long)) {
+            unsigned long valA = *(unsigned long *)(snapA[i].data + off);
+            unsigned long valB = *(unsigned long *)(snapB[i].data + off);
+            unsigned long valC = *(unsigned long *)(snapC[i].data + off);
+
+            /* Address in .data changed across all 3 distinct inputs (aaaa, bbbb, pass) */
+            if (valA != valB && valB != valC && valA != valC && valA != 0 && valB != 0 && valC != 0 && !is_ascii_dword(valC)) {
+                target_new_hash = valC; /* Hash of <new_password> calculated BY target program! */
+                break;
+            }
+        }
+    }
+
+    free_snapshot(snapA, countA);
+    free_snapshot(snapB, countB);
+    free_snapshot(snapC, countC);
+
+    if (stored_hash_addr && target_new_hash != 0) {
+        printf("  FOUND stored_hash @ %p (old hash = %lu)\n", stored_hash_addr, old_hash_val);
+        printf("  INTERCEPTED hash of '%s' computed by target = %lu\n\n", new_password, target_new_hash);
+
+        if (patch_value(hProcess, stored_hash_addr, target_new_hash)) {
+            printf("=== SUCCESS ===\n");
+            printf("Password in \"%s\" changed to \"%s\"!\n", process_name, new_password);
+            printf("Go to %s and type '%s' to confirm Access Granted!\n", process_name, new_password);
+            CloseHandle(hProcess);
+            return 0;
+        }
+    }
+
+    printf("\nFAILED: Could not isolate stored hash in RAM.\n");
     CloseHandle(hProcess);
-    return result;
+    return 1;
 }

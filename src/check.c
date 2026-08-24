@@ -31,8 +31,9 @@ static unsigned long hash_password(const char *str) {
     return hash;
 }
 
-/* Global stored hash variable located in the binary's .data section */
+/* Global variables stored in binary's .data section */
 volatile unsigned long stored_hash = 401824839UL;
+volatile unsigned long input_hash = 0;
 
 int main(int argc, char *argv[]) {
     int daemon_mode = 0;
@@ -71,7 +72,7 @@ int main(int argc, char *argv[]) {
          * The comparison uses two unsigned long values (not strings).
          * A standard string scanner searching for "s3cr3t" will find nothing.
          */
-        volatile unsigned long input_hash = hash_password(input);
+        input_hash = hash_password(input);
 
         if (input_hash == stored_hash) {
             printf("Access Granted\n");

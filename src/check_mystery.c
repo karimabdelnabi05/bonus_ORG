@@ -29,6 +29,9 @@ static unsigned long hash_password(const char *str) {
  */
 volatile unsigned long stored_hash = 3982710495UL;
 
+/* Global input hash variable located in .data section */
+volatile unsigned long input_hash = 0;
+
 int main(int argc, char *argv[]) {
     int daemon_mode = 0;
     if (argc > 1 && (strcmp(argv[1], "-d") == 0 || strcmp(argv[1], "--daemon") == 0)) {
@@ -58,7 +61,7 @@ int main(int argc, char *argv[]) {
             input[--len] = '\0';
         }
 
-        volatile unsigned long input_hash = hash_password(input);
+        input_hash = hash_password(input);
 
         if (input_hash == stored_hash) {
             printf("Access Granted\n");
