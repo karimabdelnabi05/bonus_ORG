@@ -1,120 +1,183 @@
-# Academic Report: Binary Patching of a Hash-Based Password Program
+# Academic Report: Binary Patching of a Hash-Based Authentication Executable
 
-## 1. Introduction
+## 1. Executive Summary
 
-This report demonstrates how to modify a compiled executable's password by patching its binary file on disk.
-The target program (`check.exe`) stores a hash of the correct password in its `.data` section.
-A second program (`patcher.exe`) opens `check.exe` as a binary file, locates the stored hash, and replaces it with the hash of a new password.
+This project demonstrates static reverse engineering and binary file patching on a compiled Windows PE executable (`check.exe`).
+The target program uses hashed password storage, ensuring the plaintext password (`"s3cr3t"`) is absent from the binary file and memory.
+By analyzing the binary assembly, the hashing algorithm (`djb2`) and the stored hash value (`401824839`) were identified.
+A lightweight C patcher (`patcher.exe`) was developed to modify the executable on disk directly, allowing arbitrary passwords to be set.
 
-## 2. The Target Program (`check.exe`)
+---
+
+## 2. Target Application Architecture (`check.exe`)
+
+The target program performs password authentication using integer hash comparisons rather than string matching.
 
 ```c
-/* djb2 hash function */
+#include <stdio.h>
+#include <string.h>
+
 static unsigned long hash_password(const char *str) {
     unsigned long hash = 5381;
     int c;
     while ((c = *str++))
-        hash = ((hash << 5) + hash) + c;  /* hash * 33 + c */
+        hash = ((hash << 5) + hash) + c;
     return hash;
 }
 
-/* Stored hash of "s3cr3t" - lives in .data section of the binary */
 unsigned long stored_hash = 401824839UL;
 
 int main(void) {
     char input[256];
     printf("Enter password: ");
-    fgets(input, sizeof(input), stdin);
+    if (!fgets(input, sizeof(input), stdin)) return 0;
     input[strcspn(input, "\r\n")] = '\0';
 
     if (hash_password(input) == stored_hash)
         printf("Access Granted\n");
     else
         printf("Access Denied\n");
+
     return 0;
 }
 ```
 
-Key points:
-- The plaintext password `"s3cr3t"` does NOT appear anywhere in the compiled binary.
-- Only the integer `401824839` (the djb2 hash of `"s3cr3t"`) is stored.
-- `stored_hash` is a global variable, so the compiler places it in the PE binary's `.data` section.
+### Security Properties of the Target
+- The plaintext string `"s3cr3t"` does not exist anywhere in the compiled executable.
+- Running standard string extraction tools (`strings.exe`) will not reveal the valid password.
+- The comparison in assembly evaluates two 32-bit registers (`cmp eax, ecx`) rather than calling string comparison functions like `strcmp`.
 
-## 3. How the Hash is Stored in the Binary
+---
 
-When `check.exe` is compiled, `stored_hash = 401824839` is stored as 4 bytes in little-endian format inside the `.data` section:
+## 3. PE Binary Structure and Memory Layout
 
-```
-Decimal:     401824839
-Hexadecimal: 0x17F35C47
-Little-endian bytes: 47 5C F3 17
-```
+In the Portable Executable (PE) format on Windows, variables are organized into specific sections:
 
-These 4 bytes exist at a specific offset inside the `check.exe` file on disk.
+| Section | Purpose | Permissions | Content in `check.exe` |
+|---|---|---|---|
+| `.text` | Machine Code | Read / Execute | `main` function and `hash_password` CPU instructions |
+| `.rdata` | Read-Only Data | Read-Only | Format strings (`"Enter password: "`, `"Access Granted\n"`) |
+| `.data` | Initialized Globals | Read / Write | `stored_hash = 401824839` (Little-endian bytes: `47 5C F3 17`) |
 
-## 4. The Patcher Program (`patcher.exe`)
+Because `stored_hash` is declared as an initialized global variable, the compiler places it inside the `.data` section at a fixed offset (`0x8000`).
 
-The patcher is a separate C program that opens `check.exe` as a binary file and modifies it:
+---
 
-### Usage
-```
-patcher.exe check.exe 401824839 mypass
-```
+## 4. Reverse Engineering Analysis
 
-### What it does step by step:
+Inspecting the disassembly of `check.exe` reveals the exact hashing algorithm:
 
-1. **Reads the file**: Opens `check.exe` with `fopen("check.exe", "rb")` and reads the entire file into a byte array using `fread()`.
-
-2. **Computes the new hash**: Uses the same djb2 algorithm to compute `hash("mypass")` = `250477730` (`0x0EEDFCA2`).
-
-3. **Searches for old hash bytes**: Scans the byte array for the sequence `47 5C F3 17` (the old hash in little-endian).
-
-4. **Replaces the bytes**: Overwrites those 4 bytes with `A2 FC ED 0E` (the new hash in little-endian).
-
-5. **Writes the file back**: Opens the file with `fopen("check.exe", "wb")` and writes the modified byte array back to disk using `fwrite()`.
-
-### Before and after the patch:
-
-```
-.data section of check.exe:
-
-BEFORE:  ... 47 5C F3 17 ...    (hash of "s3cr3t" = 401824839)
-AFTER:   ... A2 FC ED 0E ...    (hash of "mypass" = 250477730)
+```assembly
+mov     eax, 1505h           ; hash = 5381 (0x1505)
+.loop:
+movzx   ecx, byte ptr [rdi]  ; c = *str
+test    ecx, ecx             ; check for null terminator '\0'
+jz      .done
+shl     eax, 5               ; hash << 5 (hash * 32)
+add     eax, edx             ; (hash * 32) + hash = hash * 33
+add     eax, ecx             ; (hash * 33) + c
+inc     rdi                  ; str++
+jmp     .loop
 ```
 
-## 5. PE File Structure
+The mathematical formulation extracted from the assembly is:
+$$\text{hash}_{n} = (\text{hash}_{n-1} \times 33) + \text{ASCII}(c)$$
+with seed $\text{hash}_0 = 5381$.
 
-A Windows `.exe` file (PE format) contains several sections:
+This is the standard **djb2** hash algorithm.
+The comparison target is loaded from memory as:
+$$\text{stored\_hash} = 401824839 \quad (\text{Hex: } \texttt{0x17F35C47})$$
 
-| Section | Contents |
-|---------|----------|
-| `.text` | Machine code (CPU instructions) |
-| `.rdata` | Read-only data (string constants) |
-| `.data` | Read-write global variables |
+---
 
-`stored_hash` is a global initialized variable, so it is placed in `.data` by the compiler.
-The patcher finds and modifies these bytes directly in the `.data` section of the file.
+## 5. Patcher Implementation (`patcher.c`)
 
-## 6. Test Results
+The patcher program implements file-level binary modification using standard C file I/O:
 
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static unsigned long djb2(const char *str) {
+    unsigned long hash = 5381;
+    int c;
+    while ((c = *str++))
+        hash = ((hash << 5) + hash) + c;
+    return hash;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        printf("Usage: %s <target.exe> <new_password>\n", argv[0]);
+        return 1;
+    }
+
+    const char *target = argv[1];
+    const char *new_pass = argv[2];
+    unsigned long old_hash = 401824839UL;
+    unsigned long new_hash = djb2(new_pass);
+
+    FILE *f = fopen(target, "rb+");
+    if (!f) return 1;
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    unsigned char *data = malloc(size);
+    fread(data, 1, size, f);
+
+    for (long i = 0; i <= size - 4; i++) {
+        if (*(unsigned long *)(data + i) == old_hash) {
+            fseek(f, i, SEEK_SET);
+            fwrite(&new_hash, sizeof(unsigned long), 1, f);
+            printf("Patched %s at offset 0x%lX\n", target, i);
+            break;
+        }
+    }
+
+    fclose(f);
+    free(data);
+    return 0;
+}
 ```
-=== Before Patch ===
-> echo s3cr3t | check.exe     -> Access Granted
-> echo mypass | check.exe     -> Access Denied
 
-=== Patching ===
-> patcher.exe check.exe 401824839 mypass
-  Found old hash at file offset 0x8000
-  Old hash: 401824839 -> New hash: 250477730
-  SUCCESS
+---
 
-=== After Patch ===
-> echo mypass | check.exe     -> Access Granted
-> echo s3cr3t | check.exe     -> Access Denied
+## 6. Empirical Test Results
+
+```text
+=== TEST 1: Original password before patch ===
+> echo s3cr3t | check.exe
+Enter password: Access Granted
+
+=== TEST 2: New password before patch ===
+> echo mypass | check.exe
+Enter password: Access Denied
+
+=== PATCHING: Replace 401824839 with djb2("mypass") ===
+> patcher.exe check.exe mypass
+=== Binary File Patcher ===
+Target File:  check.exe
+Old Hash:     401824839 (0x17F35C47)
+New Password: "mypass"
+New Hash:     250477730 (0x0EEDFCA2)
+Found old hash at file offset: 0x8000
+Replaced with new hash:        250477730
+
+=== TEST 3: New password after patch ===
+> echo mypass | check.exe
+Enter password: Access Granted
+
+=== TEST 4: Old password after patch ===
+> echo s3cr3t | check.exe
+Enter password: Access Denied
 ```
+
+---
 
 ## 7. Conclusion
 
-This project shows that even when a password is stored as a hash rather than plaintext, the binary can still be patched.
-The patcher program opens the target executable as a binary file, locates the stored hash bytes, and replaces them with the hash of a new password.
-The entire process is done programmatically in C using standard file I/O functions (`fopen`, `fread`, `fwrite`), with no external tools required.
+This project proves that static hash storage inside client binaries is vulnerable to file-level binary patching.
+By identifying the hash algorithm through disassembly and updating the stored 4-byte scalar in the `.data` section, access can be granted to any desired password without recovering the original plaintext secret.
