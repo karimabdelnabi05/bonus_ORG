@@ -1,18 +1,19 @@
-# Academic Report: Binary Patching of an XOR Hash-Based Authentication Executable
+# Academic Report: Static & Dynamic Binary Patching of an XOR Hash Authentication Executable
 
 ## 1. Executive Summary
 
-This project demonstrates static reverse engineering and binary file patching on a compiled Windows PE executable (`check.exe`).
-The target program uses a simple XOR-based hash function for password authentication.
-This ensures the plaintext password (`"s3cr3t"`) is completely absent from the compiled binary and memory.
-By inspecting the disassembly of the binary, the hashing algorithm (`(hash * 31) ^ c`) and the stored hash value (`287671138`) were identified.
-A lightweight C patcher (`patcher.exe`) was written to modify the executable file on disk directly, allowing any chosen password to gain access.
+This report demonstrates both static (file-level) and dynamic (runtime RAM) binary patching of a compiled Windows PE executable (`check.exe`).
+The target program authenticates passwords using a 32-bit XOR hash algorithm, ensuring that the plaintext password (`"s3cr3t"`) is absent from the binary file and process memory.
+By disassembling the binary, the hashing formula (`(hash * 31) ^ c`) and the stored hash value (`287671138`) were identified.
+Two distinct patchers were implemented:
+1. `patcher.exe`: Performs static file patching on disk via standard file I/O.
+2. `live_patcher.exe`: Performs dynamic process memory patching using Windows kernel APIs while the process is actively executing.
 
 ---
 
 ## 2. Target Application Architecture (`check.exe`)
 
-The target program performs password authentication using a simple, classical XOR hash function:
+The target program performs password authentication using an XOR accumulation hash:
 
 ```c
 #include <stdio.h>
@@ -26,47 +27,49 @@ static unsigned long hash_password(const char *str) {
     return hash;
 }
 
-unsigned long stored_hash = 287671138UL;
+volatile unsigned long stored_hash = 287671138UL;
 
 int main(void) {
     char input[256];
-    printf("Enter password: ");
-    if (!fgets(input, sizeof(input), stdin)) return 0;
-    input[strcspn(input, "\r\n")] = '\0';
+    printf("=== Password Verification Terminal ===\n");
+    while (1) {
+        printf("Enter password: ");
+        if (!fgets(input, sizeof(input), stdin)) break;
+        input[strcspn(input, "\r\n")] = '\0';
 
-    if (hash_password(input) == stored_hash)
-        printf("Access Granted\n");
-    else
-        printf("Access Denied\n");
-
+        if (hash_password(input) == stored_hash)
+            printf("Access Granted\n\n");
+        else
+            printf("Access Denied\n\n");
+    }
     return 0;
 }
 ```
 
 ### Security Properties
-- The plaintext string `"s3cr3t"` does not exist anywhere in the compiled executable.
-- Running standard string extraction tools (`strings.exe`) will not reveal the valid password.
-- The comparison in assembly evaluates two 32-bit registers (`cmp eax, ecx`) rather than invoking string comparison functions.
+- The plaintext string `"s3cr3t"` does not appear anywhere in the compiled executable.
+- Running string analysis tools (`strings.exe`) will not reveal the valid credential.
+- The comparison evaluates two 32-bit integer registers (`cmp eax, ecx`).
 
 ---
 
 ## 3. PE Binary Structure and Memory Layout
 
-In the Portable Executable (PE) format on Windows, variables are organized into distinct sections:
+In the Windows PE format, variables and code reside in specific sections:
 
 | Section | Purpose | Permissions | Content in `check.exe` |
 |---|---|---|---|
-| `.text` | Machine Code | Read / Execute | `main` and `hash_password` CPU instructions |
-| `.rdata` | Read-Only Data | Read-Only | Format strings (`"Enter password: "`, `"Access Granted\n"`) |
-| `.data` | Initialized Globals | Read / Write | `stored_hash = 287671138` (Little-endian bytes: `62 83 25 11`) |
+| `.text` | Executable Code | Read / Execute | `main` and `hash_password` instructions |
+| `.rdata` | Read-Only Data | Read-Only | Prompt strings and banners |
+| `.data` | Read-Write Globals | Read / Write | `stored_hash = 287671138` (Bytes: `62 83 25 11`) |
 
-Because `stored_hash` is declared as an initialized global variable, the compiler places it inside the `.data` section at file offset `0x8000`.
+Because `stored_hash` is declared as an initialized global variable, the compiler places it in the `.data` section at file offset `0x8000`.
 
 ---
 
 ## 4. Reverse Engineering Analysis
 
-Disassembling `check.exe` reveals the exact XOR hashing loop:
+Disassembling `check.exe` reveals the XOR hashing loop:
 
 ```assembly
 mov     eax, 5Ah             ; hash = 0x5A (seed)
@@ -80,7 +83,7 @@ inc     rdi                  ; str++
 jmp     .loop
 ```
 
-The mathematical formulation extracted from the assembly is:
+The mathematical formula extracted from the assembly is:
 $$\text{hash}_{n} = (\text{hash}_{n-1} \times 31) \oplus \text{ASCII}(c)$$
 with seed $\text{hash}_0 = \texttt{0x5A}$.
 
@@ -89,9 +92,9 @@ $$\text{stored\_hash} = 287671138 \quad (\text{Hex: } \texttt{0x11258362})$$
 
 ---
 
-## 5. Patcher Implementation (`patcher.c`)
+## 5. Method 1: Static File Patching (`patcher.c`)
 
-The patcher program implements file-level binary modification using standard C file I/O:
+The static patcher modifies `check.exe` on disk while closed using standard C file I/O:
 
 ```c
 #include <stdio.h>
@@ -107,11 +110,6 @@ static unsigned long xor_hash(const char *str) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        printf("Usage: %s <target.exe> <new_password>\n", argv[0]);
-        return 1;
-    }
-
     const char *target = argv[1];
     const char *new_pass = argv[2];
     unsigned long old_hash = 287671138UL;
@@ -144,39 +142,89 @@ int main(int argc, char *argv[]) {
 
 ---
 
-## 6. Empirical Test Results
+## 6. Method 2: Dynamic RAM Patching (`live_patcher.c`)
 
-```text
-=== TEST 1: Original password before patch ===
-> echo s3cr3t | check.exe
-Enter password: Access Granted
+The dynamic patcher modifies `check.exe` in live memory while actively running:
 
-=== TEST 2: New password before patch ===
-> echo mypass | check.exe
-Enter password: Access Denied
+```c
+#include <stdio.h>
+#include <windows.h>
+#include <tlhelp32.h>
 
-=== PATCHING: Replace 287671138 with xor_hash("mypass") ===
-> patcher.exe check.exe mypass
-=== Binary File Patcher (XOR Hash) ===
-Target File:  check.exe
-Old Hash:     287671138 (0x11258362)
-New Password: "mypass"
-New Hash:     4216307715 (0xFB4FC003)
-Found old hash at file offset: 0x8000
-Replaced with new hash:        4216307715 (0xFB4FC003)
+/* Locates check.exe PID, scans RAM for old_hash, and overwrites with WriteProcessMemory */
+int main(int argc, char *argv[]) {
+    const char *new_pass = argv[1];
+    unsigned long old_hash = 287671138UL;
+    unsigned long new_hash = xor_hash(new_pass);
 
-=== TEST 3: New password after patch ===
-> echo mypass | check.exe
-Enter password: Access Granted
+    DWORD pid = find_pid("check.exe");
+    HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, pid);
 
-=== TEST 4: Old password after patch ===
-> echo s3cr3t | check.exe
-Enter password: Access Denied
+    MEMORY_BASIC_INFORMATION mbi;
+    unsigned char *addr = NULL;
+
+    while (VirtualQueryEx(hProcess, addr, &mbi, sizeof(mbi))) {
+        if (mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY))) {
+            unsigned char buf[4096];
+            SIZE_T br;
+            for (SIZE_T i = 0; i < mbi.RegionSize; i += sizeof(buf)) {
+                if (ReadProcessMemory(hProcess, (unsigned char *)mbi.BaseAddress + i, buf, sizeof(buf), &br)) {
+                    for (SIZE_T j = 0; j <= br - 4; j += 4) {
+                        if (*(unsigned long *)(buf + j) == old_hash) {
+                            void *target = (unsigned char *)mbi.BaseAddress + i + j;
+                            WriteProcessMemory(hProcess, target, &new_hash, 4, NULL);
+                            printf("Live-patched check.exe in RAM @ %p\n", target);
+                            CloseHandle(hProcess);
+                            return 0;
+                        }
+                    }
+                }
+            }
+        }
+        addr = (unsigned char *)mbi.BaseAddress + mbi.RegionSize;
+    }
+    CloseHandle(hProcess);
+    return 1;
+}
 ```
 
 ---
 
-## 7. Conclusion
+## 7. Comparative Analysis
 
-This project proves that static hash storage inside client binaries is vulnerable to file-level binary patching.
-By identifying the XOR hash algorithm through disassembly and updating the stored 4-byte scalar in the `.data` section, access can be granted to any desired password without recovering the original plaintext secret.
+| Feature | Static File Patching (`patcher.exe`) | Dynamic RAM Patching (`live_patcher.exe`) |
+|---|---|---|
+| **Target Medium** | `.exe` binary file on disk | Virtual Address Space in RAM |
+| **Execution State** | Process must be **closed** | Process must be **running** |
+| **Persistence** | Permanent (persists across restarts) | Volatile (resets when process exits) |
+| **API Mechanism** | Standard C File I/O (`fopen`, `fwrite`) | Win32 Process APIs (`WriteProcessMemory`) |
+
+---
+
+## 8. Empirical Test Logs
+
+```text
+=== STATIC PATCH TEST ===
+> echo s3cr3t | check.exe
+Access Granted
+> patcher.exe check.exe mypass
+Patched offset 0x8000: 287671138 -> 4216307715
+> echo mypass | check.exe
+Access Granted
+
+=== DYNAMIC RAM PATCH TEST ===
+[Terminal 1] check.exe running (PID 22452)
+Input: mypass -> Access Denied
+[Terminal 2] live_patcher.exe mypass
+Located stored_hash in RAM @ 00007FF7C9199000
+Overwrote RAM: 287671138 -> 4216307715
+[Terminal 1]
+Input: mypass -> Access Granted (Immediate without restart!)
+```
+
+---
+
+## 9. Conclusion
+
+This project demonstrates comprehensive reverse engineering and patching capabilities across both persistent file storage and volatile process memory.
+Whether modifying disk bytes or live virtual memory pages, isolating the hashing algorithm and hash variable in the `.data` section allows complete authentication bypass with arbitrary credentials.

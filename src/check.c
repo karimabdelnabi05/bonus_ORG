@@ -6,6 +6,10 @@
  *
  * Stored hash for "s3cr3t": 287671138 (0x11258362)
  *
+ * Runs in a loop so you can test both:
+ *   1. Static file patching (before running)
+ *   2. Live RAM patching (while running)
+ *
  * Compile: gcc -o check.exe src/check.c
  */
 
@@ -21,24 +25,31 @@ static unsigned long hash_password(const char *str) {
     return hash;
 }
 
-/* Stored XOR hash of "s3cr3t" in the .data section */
-unsigned long stored_hash = 287671138UL;
+/* Stored XOR hash of "s3cr3t" in the .data section (volatile so RAM changes take effect) */
+volatile unsigned long stored_hash = 287671138UL;
 
 int main(void) {
     char input[256];
 
-    printf("Enter password: ");
-    if (!fgets(input, sizeof(input), stdin))
-        return 0;
+    printf("=== Password Verification Terminal ===\n");
+    printf("(Press Ctrl+C to exit)\n\n");
 
-    /* Remove trailing newline */
-    input[strcspn(input, "\r\n")] = '\0';
+    while (1) {
+        printf("Enter password: ");
+        fflush(stdout);
 
-    /* Compare computed input hash against stored hash */
-    if (hash_password(input) == stored_hash) {
-        printf("Access Granted\n");
-    } else {
-        printf("Access Denied\n");
+        if (!fgets(input, sizeof(input), stdin))
+            break;
+
+        /* Remove trailing newline */
+        input[strcspn(input, "\r\n")] = '\0';
+
+        /* Compare computed input hash against stored hash */
+        if (hash_password(input) == stored_hash) {
+            printf("Access Granted\n\n");
+        } else {
+            printf("Access Denied\n\n");
+        }
     }
 
     return 0;

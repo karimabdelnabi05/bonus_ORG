@@ -1,41 +1,43 @@
-# Binary Password Patcher (XOR Hash Authentication)
+# Binary Password Patcher (Static & Dynamic RAM Patching)
 
-A clean demonstration of reverse-engineering a compiled binary with simple XOR-based hashed password storage and patching the executable on disk to accept a new password.
+A comprehensive reverse-engineering project demonstrating how to patch a compiled Windows executable with XOR-hashed password storage using two distinct approaches:
+1. **Static File Patching** (modifies the `.exe` file on disk while closed).
+2. **Dynamic RAM Patching** (modifies `check.exe` in live memory while actively running).
 
 ---
 
 ## 📌 Project Overview
 
-1. **`check.exe`**: A program that validates a user password using a simple XOR hash function. The plaintext password (`"s3cr3t"`) does not exist in the binary file or memory.
-2. **`patcher.exe`**: A C program that opens `check.exe` as a binary file on disk, locates the stored XOR hash in the `.data` section, and replaces it with the XOR hash of your chosen new password.
+- **`check.exe`**: Target application that authenticates user input against a 32-bit XOR hash stored in `.data`. The plaintext password `"s3cr3t"` does not exist in the binary file or memory.
+- **`patcher.exe`**: Static file patcher that opens `check.exe` using standard file I/O (`fopen`, `fseek`, `fwrite`) and updates the stored hash bytes permanently on disk.
+- **`live_patcher.exe`**: Dynamic RAM patcher that attaches to the running `check.exe` process and updates the stored hash in live memory using `WriteProcessMemory`.
 
 ---
 
-## 🚀 Quick Start (Build & Run)
+## 🚀 Quick Start (Compilation)
 
-### 1. Compile Both Programs
 ```powershell
 gcc -o check.exe src/check.c
 gcc -o patcher.exe src/patcher.c
+gcc -o live_patcher.exe src/live_patcher.c
 ```
 
-### 2. Verify Original Password
+---
+
+## 🧪 Option 1: Static File Patching (Disk)
+
+Use this method to permanently change the password in the `.exe` file on disk.
+
 ```powershell
+# 1. Verify original password
 echo s3cr3t | ./check.exe
 # Output: Access Granted
 
-echo mypass | ./check.exe
-# Output: Access Denied
-```
-
-### 3. Patch the Binary
-```powershell
+# 2. Patch check.exe to accept "mypass"
 ./patcher.exe check.exe mypass
-# Output: Found old hash at file offset: 0x8000 -> Replaced with new hash: 4216307715
-```
+# Output: Patched offset 0x8000: 287671138 -> 4216307715
 
-### 4. Verify Patched Password
-```powershell
+# 3. Verify new password
 echo mypass | ./check.exe
 # Output: Access Granted
 
@@ -45,18 +47,47 @@ echo s3cr3t | ./check.exe
 
 ---
 
-## 🔍 How It Works (The 3 Steps)
+## ⚡ Option 2: Dynamic RAM Patching (Live Process)
 
-### Step 1: Assembly Inspection
-When inspecting `check.exe` in assembly, the password validation routine reveals two key details:
-- **Hash Algorithm**: The loop calculates `hash = (hash * 31) ^ c` with an initial seed of `0x5A`.
-- **Stored Hash**: The constant integer **`287671138`** (`0x11258362`) is loaded from the `.data` section.
+Use this method to change the password in live memory while `check.exe` is actively running.
+
+### Terminal 1 (Start the target program):
+```powershell
+.\check.exe
+```
+- Type: `s3cr3t` $\rightarrow$ `Access Granted`
+- Type: `mypass` $\rightarrow$ `Access Denied`
+
+### Terminal 2 (Run the live patcher while check.exe is still open):
+```powershell
+.\live_patcher.exe mypass
+```
+```text
+=== Dynamic Runtime Memory Patcher (XOR Hash) ===
+
+Target Process: check.exe
+[1] Found running check.exe (PID 22452)
+[2] Located stored_hash in RAM @ 00007FF7C9199000
+[3] Overwrote RAM: 287671138 -> 4216307715
+=== SUCCESS ===
+```
+
+### Return to Terminal 1:
+- Type: `mypass` $\rightarrow$ **`Access Granted`** (takes effect immediately without restarting!)
+- Type: `s3cr3t` $\rightarrow$ **`Access Denied`**
+
+---
+
+## 🔍 How the Reverse Engineering Works
+
+### 1. Assembly Analysis of `check.exe`
+Inspecting `check.exe` in assembly reveals the XOR hashing loop and the stored hash value:
 
 ```assembly
-mov     eax, 5Ah             ; hash = 0x5A
+mov     eax, 5Ah             ; hash = 0x5A (initial seed)
 .loop:
 movzx   ecx, byte ptr [rdi]  ; c = *str
-test    ecx, ecx             ; check for '\0'
+test    ecx, ecx             ; check for null terminator '\0'
 jz      .done
 imul    eax, eax, 31         ; hash = hash * 31
 xor     eax, ecx             ; hash = hash ^ c
@@ -64,28 +95,20 @@ inc     rdi                  ; str++
 jmp     .loop
 ```
 
-### Step 2: Hash Calculation
-`patcher.exe` uses the identified XOR formula to calculate the hash for the new password:
+- **Hash Formula**: $\text{hash}_{n} = (\text{hash}_{n-1} \times 31) \oplus \text{ASCII}(c)$ starting with seed `0x5A`.
+- **Stored Hash Constant**: `287671138` (`0x11258362`) in the `.data` section.
+
+### 2. Hash Calculation
+For the new password `"mypass"`:
 $$\text{XOR\_hash}("mypass") = 4216307715 \quad (\text{Hex: } \texttt{0xFB4FC003})$$
-
-### Step 3: Binary Patching
-`patcher.exe` opens `check.exe` directly on disk (`fopen("check.exe", "rb+")`):
-- Locates the 4-byte sequence `62 83 25 11` (stored hash `287671138` in little-endian).
-- Overwrites it with `03 C0 4F FB` (new hash `4216307715` in little-endian).
-
-```
-check.exe file on disk (Offset 0x8000):
-
-BEFORE PATCH: [62 83 25 11]  -->  287671138   -->  XOR_hash("s3cr3t")
-AFTER PATCH:  [03 C0 4F FB]  -->  4216307715  -->  XOR_hash("mypass")
-```
 
 ---
 
-## 📁 Repository Structure
+## 📁 Repository Layout
 
 | File | Description |
 |---|---|
-| [`src/check.c`](src/check.c) | Password verification program storing a 32-bit XOR hash in `.data`. |
-| [`src/patcher.c`](src/patcher.c) | Binary file patcher that replaces the stored hash bytes on disk. |
-| [`docs/report.md`](docs/report.md) | Full academic report with PE section breakdown and test verification. |
+| [`src/check.c`](src/check.c) | Target binary with XOR-hashed password verification loop. |
+| [`src/patcher.c`](src/patcher.c) | Static file patcher modifying `check.exe` bytes on disk (`fopen`/`fwrite`). |
+| [`src/live_patcher.c`](src/live_patcher.c) | Dynamic memory patcher modifying running process RAM (`WriteProcessMemory`). |
+| [`docs/report.md`](docs/report.md) | Full academic report detailing PE structure, assembly analysis, and both patchers. |
