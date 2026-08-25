@@ -1,85 +1,42 @@
 /*
- * check.c - Target program with HASHED password storage
+ * check.c - Simple password checker using hashed storage
  *
- * This program stores a HASH of the password (not the plaintext).
- * It uses the djb2 hash algorithm to hash user input and compares
- * the resulting hash against the pre-computed stored hash.
+ * The password is NOT stored as plaintext in the binary.
+ * Instead, a hash of the password is stored in the .data section.
+ * User input is hashed at runtime and compared against the stored hash.
  *
- * The attacker does NOT know:
- *   1. What the original password is
- *   2. What hash algorithm is used
- *   3. What the stored hash value is
+ * Hash algorithm: djb2 (Dan Bernstein)
+ * Original password: "s3cr3t" -> hash = 401824839
  *
  * Compile: gcc -o check.exe src/check.c
  */
 
 #include <stdio.h>
 #include <string.h>
-#include <windows.h>
 
-/* ========================================================================
- *  djb2 hash function (Dan Bernstein)
- *  A well-known, simple, non-cryptographic hash function.
- *  The attacker should NOT know this function exists.
- * ======================================================================== */
+/* djb2 hash function */
 static unsigned long hash_password(const char *str) {
     unsigned long hash = 5381;
     int c;
-    while ((c = *str++)) {
-        hash = ((hash << 5) + hash) + c;  /* hash * 33 + c */
-    }
+    while ((c = *str++))
+        hash = ((hash << 5) + hash) + c;
     return hash;
 }
 
-/* Global variables stored in binary's .data section */
-volatile unsigned long stored_hash = 401824839UL;
-volatile unsigned long input_hash = 0;
+/* Stored hash of "s3cr3t" - lives in .data section of the PE binary */
+unsigned long stored_hash = 401824839UL;
 
-int main(int argc, char *argv[]) {
-    int daemon_mode = 0;
-    if (argc > 1 && (strcmp(argv[1], "-d") == 0 || strcmp(argv[1], "--daemon") == 0)) {
-        daemon_mode = 1;
-    }
-
+int main(void) {
     char input[256];
 
-    printf("=== Secure Access Terminal (Hashed) ===\n");
-    printf("(Press Ctrl+C to exit)\n\n");
+    printf("Enter password: ");
+    fgets(input, sizeof(input), stdin);
+    input[strcspn(input, "\r\n")] = '\0';
 
-    while (1) {
-        printf("Enter password: ");
-        fflush(stdout);
-
-        if (fgets(input, sizeof(input), stdin) == NULL) {
-            if (daemon_mode) {
-                printf("(stdin closed - daemon waiting...)\n");
-                fflush(stdout);
-                while (1) { Sleep(1000); }
-            } else {
-                break;
-            }
-        }
-
-        /* Strip all trailing whitespace */
-        size_t len = strlen(input);
-        while (len > 0 && (input[len - 1] == '\n' || input[len - 1] == '\r' ||
-                           input[len - 1] == ' '  || input[len - 1] == '\t')) {
-            input[--len] = '\0';
-        }
-
-        /*
-         * Hash the user input and compare against stored hash.
-         * The comparison uses two unsigned long values (not strings).
-         * A standard string scanner searching for "s3cr3t" will find nothing.
-         */
-        input_hash = hash_password(input);
-
-        if (input_hash == stored_hash) {
-            printf("Access Granted\n");
-        } else {
-            printf("Access Denied\n");
-        }
-        printf("\n");
+    if (hash_password(input) == stored_hash) {
+        printf("Access Granted\n");
+    } else {
+        printf("Access Denied\n");
     }
 
     return 0;

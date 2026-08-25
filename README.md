@@ -1,68 +1,74 @@
-# Runtime Memory Patcher (Hashed Passwords) - Bonus Project
+# Bonus Assignment - Binary Password Patcher
 
-An academic systems programming project demonstrating runtime process memory modification on Windows binaries with **hashed password storage**.
+A demonstration of reverse engineering a hashed-password program and patching the binary to change the password.
 
----
+## What This Project Does
 
-## 📌 Project Overview
+1. **`check.exe`** - A program that asks for a password. The password is stored as a **hash** (not plaintext) inside the binary's `.data` section.
+2. **`patcher.exe`** - A tool that modifies the `check.exe` binary file on disk, replacing the old stored hash with the hash of a new password.
 
-This repository contains two C programs:
+## How It Works
 
-1. **`check.exe`** — Target binary with a hashed password. The plaintext password string (`"s3cr3t"`) **does not exist anywhere in memory or in the binary file**; only its pre-computed djb2 hash (`401824839`) is stored in the `.data` section.
-2. **`debug_patcher.exe`** — An automated Windows tool that scans a running `check.exe` process's RAM, computes the hash for a new password (e.g., `"pass"` = `2090608092`), and overwrites the stored hash live in memory via `WriteProcessMemory`.
+### Step 1: Reverse Engineer `check.exe`
 
----
+Open `check.exe` in **x64dbg** (or a hex editor) and find:
+- The hash algorithm used (djb2)
+- The stored hash value: `401824839` (hex: `0x17F35C47`)
+- Located in the `.data` section at file offset `0x8000`
 
-## 🚀 Quick Start (2 Commands)
+See [docs/x64dbg-guide.md](docs/x64dbg-guide.md) for the step-by-step walkthrough.
 
-### Step 1: Start `check.exe`
+### Step 2: Patch the Binary
+
 ```powershell
-.\build\check.exe
-```
-*(Leave it running in Terminal 1).*
+# Compile
+gcc -o check.exe src/check.c
+gcc -o patcher.exe src/patcher.c
 
-### Step 2: Run `debug_patcher.exe`
+# Test original password
+echo s3cr3t | ./check.exe
+# Output: Access Granted
+
+# Patch: replace old hash with hash("mypass")
+./patcher.exe check.exe 401824839 mypass
+
+# Test new password
+echo mypass | ./check.exe
+# Output: Access Granted
+```
+
+### Step 3: Verify
+
 ```powershell
-.\build\debug_patcher.exe check.exe pass
+# Old password no longer works
+echo s3cr3t | ./check.exe
+# Output: Access Denied
+
+# New password works
+echo mypass | ./check.exe
+# Output: Access Granted
 ```
 
-### Step 3: Test in Terminal 1:
-- Type **`pass`** $\rightarrow$ **`Access Granted`** 🎉
-- Type **`s3cr3t`** (old password) $\rightarrow$ **`Access Denied`**
+## Files
 
----
+| File | Description |
+|------|-------------|
+| `src/check.c` | Target program - hashes input and compares with stored hash |
+| `src/patcher.c` | Binary patcher - finds old hash bytes in .exe file and replaces them |
+| `docs/report.md` | Academic report explaining the approach |
+| `docs/x64dbg-guide.md` | Step-by-step x64dbg reverse engineering guide |
 
-## 🛠️ How It Works (Win32 API Architecture)
+## The Approach
 
 ```
-[patcher.exe] ──> 1. CreateToolhelp32Snapshot()  ──> Finds PID of check.exe
-              ──> 2. OpenProcess(PROCESS_VM_READ|WRITE) ──> Obtains RAM Handle
-              ──> 3. VirtualQueryEx() + ReadProcessMemory() ──> Scans .data Section for Stored Hash
-              ──> 4. VirtualProtectEx() + WriteProcessMemory() ──> Overwrites Stored Hash
+check.exe on disk:
+  .data section contains: [47 5C F3 17]  (401824839 in little-endian)
+
+patcher.exe:
+  1. Reads check.exe as raw bytes
+  2. Searches for bytes [47 5C F3 17]
+  3. Replaces with hash("mypass") = [A2 FC ED 0E]
+  4. Writes modified file back to disk
+
+Result: check.exe now accepts "mypass" instead of "s3cr3t"
 ```
-
----
-
-## 📁 Repository Structure
-
-```text
-bonus_ORG/
-├── README.md               # Quick Start & Project Overview
-├── docs/
-│   ├── report.md           # 🎓 Full Academic Report for Professor
-│   └── x64dbg-guide.md     # Step-by-Step Manual Debugger Guide
-├── src/
-│   ├── check.c             # Target Binary (Hashed Password Storage)
-│   └── debug_patcher.c     # Automated Win32 Process Memory Patcher
-└── tests/
-    ├── test_harness.h      # Lightweight C Unit Test Framework
-    ├── test_check.c        # Integration Tests for check.exe
-    └── test_patcher_e2e.c  # Automated End-to-End Test for Patcher
-```
-
----
-
-## 🎓 Documentation & Reports
-
-- **Academic Report**: Read [`docs/report.md`](docs/report.md) for the full theoretical report (Virtual Memory, PE Sections, Win32 APIs, Test Results).
-- **Debugger Guide**: Read [`docs/x64dbg-guide.md`](docs/x64dbg-guide.md) for step-by-step x64dbg instructions.

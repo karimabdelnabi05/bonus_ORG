@@ -1,63 +1,95 @@
-# x64dbg Guide: Changing a Hashed Password at Runtime
+# x64dbg Guide: Finding the Stored Hash in check.exe
 
-This guide explains how to use **x64dbg** to change the password in a running `check.exe` instance where the password is **hashed**.
-You do NOT need to know the original password, the hash algorithm, or the stored hash value.
+This guide shows how to use x64dbg to reverse-engineer `check.exe` and find:
+1. The stored hash value
+2. The hash algorithm
+3. The file offset where the hash is stored
 
----
+## Prerequisites
 
-## How It Works (Theory)
+- Download x64dbg from: https://x64dbg.com
+- Compile `check.exe`: `gcc -o check.exe src/check.c`
 
-When `check.exe` runs the comparison `if (input_hash == stored_hash)`, both values exist in CPU registers or on the stack at that exact moment.
-By setting a breakpoint on the comparison instruction, you can:
-1. See the stored hash value in a register or memory
-2. Overwrite it with the hash of your desired new password
+## Step 1: Open check.exe in x64dbg
 
----
+1. Launch **x64dbg** (use `x96dbg.exe`, then select **x64**).
+2. Go to **File > Open** and select `check.exe`.
+3. x64dbg will break at the entry point.
 
-## Step-by-Step Instructions
+## Step 2: Find the Main Function
 
-### Step 1: Start `check.exe`
-```powershell
-.\build\check.exe
+1. Press **Ctrl+G** (Go to address).
+2. Type `main` and press Enter.
+3. You should see the `main` function's assembly code.
+
+## Step 3: Find the Hash Comparison
+
+Look for a `cmp` (compare) instruction near a conditional jump (`je` or `jne`).
+This is where the program compares `hash(input)` against `stored_hash`:
+
+```asm
+call    <hash_password>       ; hash the user input
+mov     [rbp+xxx], eax        ; store result in input_hash
+mov     ecx, [<stored_hash>]  ; load stored_hash from .data section
+cmp     eax, ecx              ; compare input_hash == stored_hash
+jne     <access_denied>       ; jump if not equal
 ```
 
-### Step 2: Launch x64dbg and Attach
-1. Open **x64dbg**.
-2. Press **`Alt + A`** (File -> Attach), select `check.exe`, click **Attach**.
-3. Press **`F9`** until status bar says **`Running`**.
+The value loaded from `.data` is the stored hash: **`0x17F35C47`** = **`401824839`** in decimal.
 
-### Step 3: Find the Comparison Instruction
-1. In the **CPU** tab, right-click -> **Search for** -> **All Modules** -> **String references**.
-2. Look for the string `"Access Granted"`. Double-click it.
-3. You will land near this assembly code:
-   ```assembly
-   call   hash_password          ; Hash user input
-   cmp    eax, [rbp-0x8]         ; Compare input_hash (eax) vs stored_hash (stack)
-   jne    0x00401080             ; Jump to "Access Denied" if not equal
-   lea    rcx, "Access Granted"  ; Load "Access Granted" string
-   ```
-4. **Set a breakpoint** on the `cmp` instruction by clicking on that line and pressing **`F2`**.
+## Step 4: Find the Hash in the .data Section
 
-### Step 4: Trigger the Breakpoint
-1. Go to `check.exe` terminal and type your **desired new password** (e.g., `mypass`). Press Enter.
-2. x64dbg will pause at the `cmp` instruction.
+1. Go to the **Memory Map** tab (Alt+M).
+2. Find the `.data` section of `check.exe`.
+3. Double-click to view its contents in the hex dump.
+4. Look for the bytes: **`47 5C F3 17`** (little-endian representation of `401824839`).
 
-### Step 5: Read the Register Values
-At the breakpoint, look at the **Registers** pane (top-right):
-- **`EAX`** (or `RAX`) = `input_hash` (the hash of `"mypass"` that you just typed)
-- The `cmp` instruction's second operand (e.g., `[rbp-0x8]`) = `stored_hash` (the unknown hash)
+```
+Address          Hex                                      ASCII
+00007FF7xxxx8000 47 5C F3 17 00 00 00 00 ...             G\..
+```
 
-### Step 6: Overwrite the Stored Hash
-1. In the **Dump** tab, press **`Ctrl + G`** (Go to address).
-2. Type the address of the stored hash (the memory operand from the `cmp` instruction, e.g., `rbp-8`).
-3. You will see the stored hash bytes in the Dump window.
-4. Right-click -> **Binary** -> **Edit...** (`Ctrl + E`).
-5. Copy the value from `EAX` (the input hash) into these bytes.
-6. Click **OK**.
+The stored hash is at file offset **`0x8000`** in the `.data` section.
 
-### Step 7: Resume and Verify
-1. Remove the breakpoint by pressing **`F2`** on the `cmp` line again.
-2. Press **`F9`** to resume execution.
-3. In `check.exe` terminal:
-   - Type **`mypass`** -> **`Access Granted`**!
-   - Type the old password -> **`Access Denied`**!
+## Step 5: Identify the Hash Algorithm
+
+Go back to the `hash_password` function and examine its assembly:
+
+```asm
+mov     eax, 1505h            ; hash = 5381 (0x1505)
+.loop:
+movzx   ecx, byte [rdi]      ; c = *str
+test    ecx, ecx              ; if c == 0, break
+je      .done
+shl     eax, 5                ; hash << 5
+add     eax, eax_prev         ; (hash << 5) + hash = hash * 33
+add     eax, ecx              ; hash * 33 + c
+inc     rdi                   ; str++
+jmp     .loop
+```
+
+The pattern `hash = 5381`, `hash * 33 + c` identifies this as the **djb2** algorithm.
+
+## Step 6: Patch Using the Patcher
+
+Now that you know:
+- **Hash algorithm**: djb2
+- **Stored hash value**: 401824839
+- **Location**: `.data` section at offset `0x8000`
+
+Run the patcher:
+
+```powershell
+patcher.exe check.exe 401824839 mypass
+```
+
+This replaces bytes `47 5C F3 17` with `A2 FC ED 0E` (`hash("mypass")`).
+
+## Alternative: Manual Patch in x64dbg
+
+Instead of using the patcher program, you can patch directly in x64dbg:
+
+1. In the hex dump, right-click the bytes `47 5C F3 17`.
+2. Select **Binary > Edit**.
+3. Change to: `A2 FC ED 0E` (little-endian of `djb2("mypass")` = `250477730`).
+4. Go to **File > Patch file** to save the modified binary.
