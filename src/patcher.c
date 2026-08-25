@@ -1,14 +1,13 @@
 /*
- * patcher.c - Binary file patcher for hash-based password authentication
+ * patcher.c - Binary file patcher for simple XOR hash authentication
  *
  * How it works:
- *   1. You analyze check.exe in assembly/binary to find:
- *      - The hash algorithm used: djb2 (hash * 33 + c, initial 5381)
- *      - The stored hash value: 401824839 (0x17F35C47)
- *   2. This program opens check.exe as a binary file on disk.
- *   3. It computes the djb2 hash of your desired new password.
- *   4. It finds the old hash bytes in the file and replaces them with the new hash.
- *   5. check.exe now accepts your new password!
+ *   1. Reverse-engineer check.exe in assembly:
+ *      - Hash function: (hash * 31) ^ c (initial seed: 0x5A)
+ *      - Stored hash value: 287671138 (0x11258362)
+ *   2. Opens check.exe as a binary file on disk.
+ *   3. Computes the XOR hash of your new password.
+ *   4. Replaces the old hash bytes with the new hash bytes.
  *
  * Usage: patcher.exe <target.exe> <new_password>
  * Example: patcher.exe check.exe mypass
@@ -20,12 +19,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* djb2 hash function - identified by analyzing check.exe's assembly */
-static unsigned long djb2(const char *str) {
-    unsigned long hash = 5381;
+/* Simple XOR hash function identified from check.exe disassembly */
+static unsigned long xor_hash(const char *str) {
+    unsigned long hash = 0x5A;
     int c;
     while ((c = *str++))
-        hash = ((hash << 5) + hash) + c;
+        hash = (hash * 31) ^ (unsigned char)c;
     return hash;
 }
 
@@ -39,24 +38,24 @@ int main(int argc, char *argv[]) {
     const char *target_path = argv[1];
     const char *new_password = argv[2];
 
-    /* The original stored hash identified from reverse-engineering check.exe */
-    unsigned long old_hash = 401824839UL;
-    unsigned long new_hash = djb2(new_password);
+    /* Stored hash discovered by inspecting check.exe binary */
+    unsigned long old_hash = 287671138UL;
+    unsigned long new_hash = xor_hash(new_password);
 
-    printf("=== Binary File Patcher ===\n\n");
+    printf("=== Binary File Patcher (XOR Hash) ===\n\n");
     printf("Target File:  %s\n", target_path);
     printf("Old Hash:     %lu (0x%08lX)\n", old_hash, old_hash);
     printf("New Password: \"%s\"\n", new_password);
     printf("New Hash:     %lu (0x%08lX)\n\n", new_hash, new_hash);
 
-    /* Step 1: Open the executable file in read+write binary mode */
+    /* Step 1: Open executable in read+write binary mode */
     FILE *f = fopen(target_path, "rb+");
     if (!f) {
         printf("ERROR: Cannot open file \"%s\"\n", target_path);
         return 1;
     }
 
-    /* Step 2: Get file size and read all bytes into buffer */
+    /* Step 2: Read binary into buffer */
     fseek(f, 0, SEEK_END);
     long file_size = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -69,7 +68,7 @@ int main(int argc, char *argv[]) {
     }
     fread(data, 1, file_size, f);
 
-    /* Step 3: Search for old hash bytes (little-endian: 47 5C F3 17) */
+    /* Step 3: Find old hash bytes in binary */
     long patch_offset = -1;
     for (long i = 0; i <= file_size - 4; i++) {
         if (*(unsigned long *)(data + i) == old_hash) {
@@ -85,7 +84,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Step 4: Overwrite old hash with new hash in the file */
+    /* Step 4: Overwrite old hash with new hash */
     fseek(f, patch_offset, SEEK_SET);
     fwrite(&new_hash, sizeof(unsigned long), 1, f);
 
@@ -94,7 +93,7 @@ int main(int argc, char *argv[]) {
 
     printf("=== SUCCESS ===\n");
     printf("Found old hash at file offset: 0x%lX\n", patch_offset);
-    printf("Replaced with new hash:        %lu\n\n", new_hash);
+    printf("Replaced with new hash:        %lu (0x%08lX)\n\n", new_hash, new_hash);
     printf("Run \"%s\" and type \"%s\" to verify Access Granted!\n", target_path, new_password);
 
     return 0;

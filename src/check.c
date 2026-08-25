@@ -1,11 +1,10 @@
 /*
- * check.c - Target program with hashed password storage
+ * check.c - Target program with simple XOR hash authentication
  *
- * The password is NOT stored as plaintext in the binary.
- * Instead, a hash of the password is stored in the .data section.
- * User input is hashed at runtime and compared against the stored hash.
+ * Password storage uses a simple XOR-based hash function.
+ * Plaintext password "s3cr3t" is not stored in the binary.
  *
- * Original password: "s3cr3t" -> hash = 401824839 (0x17F35C47)
+ * Stored hash for "s3cr3t": 287671138 (0x11258362)
  *
  * Compile: gcc -o check.exe src/check.c
  */
@@ -13,17 +12,17 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Hash algorithm (djb2: hash * 33 + c) */
+/* Simple XOR hash function: (hash * 31) ^ character */
 static unsigned long hash_password(const char *str) {
-    unsigned long hash = 5381;
+    unsigned long hash = 0x5A;
     int c;
     while ((c = *str++))
-        hash = ((hash << 5) + hash) + c;
+        hash = (hash * 31) ^ (unsigned char)c;
     return hash;
 }
 
-/* Stored hash of "s3cr3t" - located in the .data section of the binary */
-unsigned long stored_hash = 401824839UL;
+/* Stored XOR hash of "s3cr3t" in the .data section */
+unsigned long stored_hash = 287671138UL;
 
 int main(void) {
     char input[256];
@@ -32,7 +31,7 @@ int main(void) {
     if (!fgets(input, sizeof(input), stdin))
         return 0;
 
-    /* Strip newline characters */
+    /* Remove trailing newline */
     input[strcspn(input, "\r\n")] = '\0';
 
     /* Compare computed input hash against stored hash */

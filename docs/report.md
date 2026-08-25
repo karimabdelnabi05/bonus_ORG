@@ -1,31 +1,32 @@
-# Academic Report: Binary Patching of a Hash-Based Authentication Executable
+# Academic Report: Binary Patching of an XOR Hash-Based Authentication Executable
 
 ## 1. Executive Summary
 
 This project demonstrates static reverse engineering and binary file patching on a compiled Windows PE executable (`check.exe`).
-The target program uses hashed password storage, ensuring the plaintext password (`"s3cr3t"`) is absent from the binary file and memory.
-By analyzing the binary assembly, the hashing algorithm (`djb2`) and the stored hash value (`401824839`) were identified.
-A lightweight C patcher (`patcher.exe`) was developed to modify the executable on disk directly, allowing arbitrary passwords to be set.
+The target program uses a simple XOR-based hash function for password authentication.
+This ensures the plaintext password (`"s3cr3t"`) is completely absent from the compiled binary and memory.
+By inspecting the disassembly of the binary, the hashing algorithm (`(hash * 31) ^ c`) and the stored hash value (`287671138`) were identified.
+A lightweight C patcher (`patcher.exe`) was written to modify the executable file on disk directly, allowing any chosen password to gain access.
 
 ---
 
 ## 2. Target Application Architecture (`check.exe`)
 
-The target program performs password authentication using integer hash comparisons rather than string matching.
+The target program performs password authentication using a simple, classical XOR hash function:
 
 ```c
 #include <stdio.h>
 #include <string.h>
 
 static unsigned long hash_password(const char *str) {
-    unsigned long hash = 5381;
+    unsigned long hash = 0x5A;
     int c;
     while ((c = *str++))
-        hash = ((hash << 5) + hash) + c;
+        hash = (hash * 31) ^ (unsigned char)c;
     return hash;
 }
 
-unsigned long stored_hash = 401824839UL;
+unsigned long stored_hash = 287671138UL;
 
 int main(void) {
     char input[256];
@@ -42,51 +43,49 @@ int main(void) {
 }
 ```
 
-### Security Properties of the Target
+### Security Properties
 - The plaintext string `"s3cr3t"` does not exist anywhere in the compiled executable.
 - Running standard string extraction tools (`strings.exe`) will not reveal the valid password.
-- The comparison in assembly evaluates two 32-bit registers (`cmp eax, ecx`) rather than calling string comparison functions like `strcmp`.
+- The comparison in assembly evaluates two 32-bit registers (`cmp eax, ecx`) rather than invoking string comparison functions.
 
 ---
 
 ## 3. PE Binary Structure and Memory Layout
 
-In the Portable Executable (PE) format on Windows, variables are organized into specific sections:
+In the Portable Executable (PE) format on Windows, variables are organized into distinct sections:
 
 | Section | Purpose | Permissions | Content in `check.exe` |
 |---|---|---|---|
-| `.text` | Machine Code | Read / Execute | `main` function and `hash_password` CPU instructions |
+| `.text` | Machine Code | Read / Execute | `main` and `hash_password` CPU instructions |
 | `.rdata` | Read-Only Data | Read-Only | Format strings (`"Enter password: "`, `"Access Granted\n"`) |
-| `.data` | Initialized Globals | Read / Write | `stored_hash = 401824839` (Little-endian bytes: `47 5C F3 17`) |
+| `.data` | Initialized Globals | Read / Write | `stored_hash = 287671138` (Little-endian bytes: `62 83 25 11`) |
 
-Because `stored_hash` is declared as an initialized global variable, the compiler places it inside the `.data` section at a fixed offset (`0x8000`).
+Because `stored_hash` is declared as an initialized global variable, the compiler places it inside the `.data` section at file offset `0x8000`.
 
 ---
 
 ## 4. Reverse Engineering Analysis
 
-Inspecting the disassembly of `check.exe` reveals the exact hashing algorithm:
+Disassembling `check.exe` reveals the exact XOR hashing loop:
 
 ```assembly
-mov     eax, 1505h           ; hash = 5381 (0x1505)
+mov     eax, 5Ah             ; hash = 0x5A (seed)
 .loop:
 movzx   ecx, byte ptr [rdi]  ; c = *str
 test    ecx, ecx             ; check for null terminator '\0'
 jz      .done
-shl     eax, 5               ; hash << 5 (hash * 32)
-add     eax, edx             ; (hash * 32) + hash = hash * 33
-add     eax, ecx             ; (hash * 33) + c
+imul    eax, eax, 31         ; hash = hash * 31
+xor     eax, ecx             ; hash = hash ^ c
 inc     rdi                  ; str++
 jmp     .loop
 ```
 
 The mathematical formulation extracted from the assembly is:
-$$\text{hash}_{n} = (\text{hash}_{n-1} \times 33) + \text{ASCII}(c)$$
-with seed $\text{hash}_0 = 5381$.
+$$\text{hash}_{n} = (\text{hash}_{n-1} \times 31) \oplus \text{ASCII}(c)$$
+with seed $\text{hash}_0 = \texttt{0x5A}$.
 
-This is the standard **djb2** hash algorithm.
-The comparison target is loaded from memory as:
-$$\text{stored\_hash} = 401824839 \quad (\text{Hex: } \texttt{0x17F35C47})$$
+The comparison target loaded from `.data` is:
+$$\text{stored\_hash} = 287671138 \quad (\text{Hex: } \texttt{0x11258362})$$
 
 ---
 
@@ -99,11 +98,11 @@ The patcher program implements file-level binary modification using standard C f
 #include <stdlib.h>
 #include <string.h>
 
-static unsigned long djb2(const char *str) {
-    unsigned long hash = 5381;
+static unsigned long xor_hash(const char *str) {
+    unsigned long hash = 0x5A;
     int c;
     while ((c = *str++))
-        hash = ((hash << 5) + hash) + c;
+        hash = (hash * 31) ^ (unsigned char)c;
     return hash;
 }
 
@@ -115,8 +114,8 @@ int main(int argc, char *argv[]) {
 
     const char *target = argv[1];
     const char *new_pass = argv[2];
-    unsigned long old_hash = 401824839UL;
-    unsigned long new_hash = djb2(new_pass);
+    unsigned long old_hash = 287671138UL;
+    unsigned long new_hash = xor_hash(new_pass);
 
     FILE *f = fopen(target, "rb+");
     if (!f) return 1;
@@ -156,15 +155,15 @@ Enter password: Access Granted
 > echo mypass | check.exe
 Enter password: Access Denied
 
-=== PATCHING: Replace 401824839 with djb2("mypass") ===
+=== PATCHING: Replace 287671138 with xor_hash("mypass") ===
 > patcher.exe check.exe mypass
-=== Binary File Patcher ===
+=== Binary File Patcher (XOR Hash) ===
 Target File:  check.exe
-Old Hash:     401824839 (0x17F35C47)
+Old Hash:     287671138 (0x11258362)
 New Password: "mypass"
-New Hash:     250477730 (0x0EEDFCA2)
+New Hash:     4216307715 (0xFB4FC003)
 Found old hash at file offset: 0x8000
-Replaced with new hash:        250477730
+Replaced with new hash:        4216307715 (0xFB4FC003)
 
 === TEST 3: New password after patch ===
 > echo mypass | check.exe
@@ -180,4 +179,4 @@ Enter password: Access Denied
 ## 7. Conclusion
 
 This project proves that static hash storage inside client binaries is vulnerable to file-level binary patching.
-By identifying the hash algorithm through disassembly and updating the stored 4-byte scalar in the `.data` section, access can be granted to any desired password without recovering the original plaintext secret.
+By identifying the XOR hash algorithm through disassembly and updating the stored 4-byte scalar in the `.data` section, access can be granted to any desired password without recovering the original plaintext secret.
