@@ -1,13 +1,19 @@
 /*
- * patcher.c - Binary file patcher for simple XOR hash authentication
+ * patcher.c - Binary File HEX Patcher for Password / Device-ID Customization
+ *
+ * Real-World Use Case:
+ *   Software vendors distribute pre-compiled binary templates (e.g. check.exe).
+ *   When a client purchases the software, the vendor customizes the executable
+ *   by patching the binary HEX on disk with the client's Hardware Device ID
+ *   or chosen password hash.
+ *   When the client opens the patched .exe, it accepts their specific credentials.
  *
  * How it works:
- *   1. Reverse-engineer check.exe in assembly:
- *      - Hash function: (hash * 31) ^ c (initial seed: 0x5A)
- *      - Stored hash value: 287671138 (0x11258362)
- *   2. Opens check.exe as a binary file on disk.
- *   3. Computes the XOR hash of your new password.
- *   4. Replaces the old hash bytes with the new hash bytes.
+ *   1. Opens the target .exe file directly on disk in binary read/write mode.
+ *   2. Computes the XOR hash of the new password: (hash * 31) ^ character.
+ *   3. Scans the binary HEX of the file to locate the embedded 4-byte hash.
+ *   4. Replaces the old HEX bytes with the new hash HEX bytes on disk.
+ *   5. Closes the file. When check.exe is opened again, it uses the new password!
  *
  * Usage: patcher.exe <target.exe> <new_password>
  * Example: patcher.exe check.exe mypass
@@ -19,7 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Simple XOR hash function identified from check.exe disassembly */
+/* Known XOR hash function: (hash * 31) ^ character (initial seed: 0x5A) */
 static unsigned long xor_hash(const char *str) {
     unsigned long hash = 0x5A;
     int c;
@@ -37,64 +43,117 @@ int main(int argc, char *argv[]) {
 
     const char *target_path = argv[1];
     const char *new_password = argv[2];
-
-    /* Stored hash discovered by inspecting check.exe binary */
-    unsigned long old_hash = 287671138UL;
     unsigned long new_hash = xor_hash(new_password);
 
-    printf("=== Binary File Patcher (XOR Hash) ===\n\n");
+    printf("============================================================\n");
+    printf("        Binary File HEX Patcher (Software Customizer)       \n");
+    printf("============================================================\n\n");
     printf("Target File:  %s\n", target_path);
-    printf("Old Hash:     %lu (0x%08lX)\n", old_hash, old_hash);
     printf("New Password: \"%s\"\n", new_password);
-    printf("New Hash:     %lu (0x%08lX)\n\n", new_hash, new_hash);
+    printf("New Hash:     %lu (Hex: 0x%08lX)\n\n", new_hash, new_hash);
 
-    /* Step 1: Open executable in read+write binary mode */
+    /* Step 1: Open the binary file on disk */
     FILE *f = fopen(target_path, "rb+");
     if (!f) {
-        printf("ERROR: Cannot open file \"%s\"\n", target_path);
+        printf("ERROR: Cannot open file \"%s\". Make sure the file exists and is closed.\n", target_path);
         return 1;
     }
 
-    /* Step 2: Read binary into buffer */
+    /* Step 2: Read entire binary into memory */
     fseek(f, 0, SEEK_END);
     long file_size = ftell(f);
     fseek(f, 0, SEEK_SET);
 
     unsigned char *data = (unsigned char *)malloc(file_size);
     if (!data) {
-        printf("ERROR: Memory allocation failed\n");
+        printf("ERROR: Memory allocation failed.\n");
         fclose(f);
         return 1;
     }
     fread(data, 1, file_size, f);
 
-    /* Step 3: Find old hash bytes in binary */
-    long patch_offset = -1;
-    for (long i = 0; i <= file_size - 4; i++) {
-        if (*(unsigned long *)(data + i) == old_hash) {
-            patch_offset = i;
-            break;
-        }
-    }
-
-    if (patch_offset < 0) {
-        printf("ERROR: Old hash %lu not found in \"%s\"\n", old_hash, target_path);
+    /* Step 3: Parse PE headers to locate the .data section */
+    if (data[0] != 'M' || data[1] != 'Z') {
+        printf("ERROR: Not a valid Windows PE executable (missing MZ header).\n");
         free(data);
         fclose(f);
         return 1;
     }
 
-    /* Step 4: Overwrite old hash with new hash */
+    unsigned long pe_offset = *(unsigned long *)(data + 0x3C);
+    unsigned short num_sections = *(unsigned short *)(data + pe_offset + 6);
+    unsigned short opt_hdr_size = *(unsigned short *)(data + pe_offset + 20);
+    unsigned long sections_start = pe_offset + 24 + opt_hdr_size;
+
+    long data_file_offset = -1;
+    long data_size = 0;
+
+    for (int i = 0; i < num_sections; i++) {
+        unsigned char *sec = data + sections_start + (i * 40);
+        char name[9] = {0};
+        memcpy(name, sec, 8);
+
+        if (strcmp(name, ".data") == 0) {
+            data_size = *(unsigned long *)(sec + 16);
+            data_file_offset = *(unsigned long *)(sec + 20);
+            break;
+        }
+    }
+
+    if (data_file_offset < 0) {
+        printf("ERROR: .data section not found in PE binary.\n");
+        free(data);
+        fclose(f);
+        return 1;
+    }
+
+    /* Step 4: Find the stored hash location in .data section */
+    long patch_offset = -1;
+    unsigned long old_hash = 0;
+
+    for (long off = 0; off + 4 <= data_size; off += 4) {
+        unsigned long val = *(unsigned long *)(data + data_file_offset + off);
+        if (val != 0) {
+            patch_offset = data_file_offset + off;
+            old_hash = val;
+            break;
+        }
+    }
+
+    if (patch_offset < 0) {
+        printf("ERROR: No stored hash found in .data section.\n");
+        free(data);
+        fclose(f);
+        return 1;
+    }
+
+    /* Step 5: Display HEX byte comparison */
+    unsigned char old_bytes[4];
+    memcpy(old_bytes, data + patch_offset, 4);
+
+    unsigned char new_bytes[4];
+    new_bytes[0] = (new_hash) & 0xFF;
+    new_bytes[1] = (new_hash >> 8) & 0xFF;
+    new_bytes[2] = (new_hash >> 16) & 0xFF;
+    new_bytes[3] = (new_hash >> 24) & 0xFF;
+
+    printf("[*] Found stored hash in .data section at File Offset: 0x%lX\n", patch_offset);
+    printf("    OLD HEX Bytes:  %02X %02X %02X %02X  (Hash: %lu / 0x%08lX)\n",
+           old_bytes[0], old_bytes[1], old_bytes[2], old_bytes[3], old_hash, old_hash);
+    printf("    NEW HEX Bytes:  %02X %02X %02X %02X  (Hash: %lu / 0x%08lX)\n\n",
+           new_bytes[0], new_bytes[1], new_bytes[2], new_bytes[3], new_hash, new_hash);
+
+    /* Step 6: Overwrite the HEX bytes on disk */
     fseek(f, patch_offset, SEEK_SET);
-    fwrite(&new_hash, sizeof(unsigned long), 1, f);
+    fwrite(new_bytes, 1, 4, f);
 
     fclose(f);
     free(data);
 
-    printf("=== SUCCESS ===\n");
-    printf("Found old hash at file offset: 0x%lX\n", patch_offset);
-    printf("Replaced with new hash:        %lu (0x%08lX)\n\n", new_hash, new_hash);
-    printf("Run \"%s\" and type \"%s\" to verify Access Granted!\n", target_path, new_password);
+    printf("============================================================\n");
+    printf(">>> SUCCESS: %s has been permanently patched on disk!\n", target_path);
+    printf(">>> Now run \"%s\" and enter \"%s\" to unlock!\n", target_path, new_password);
+    printf("============================================================\n");
 
     return 0;
 }

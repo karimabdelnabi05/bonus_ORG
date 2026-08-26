@@ -1,90 +1,86 @@
-# Binary Password Patcher (Static & Dynamic RAM Patching)
+# Binary File HEX Patcher (Software Licensing & Device-ID Customizer)
 
-A comprehensive reverse-engineering project demonstrating how to patch a compiled Windows executable with XOR-hashed password storage using two distinct approaches:
-1. **Static File Patching** (modifies the `.exe` file on disk while closed).
-2. **Dynamic RAM Patching** (modifies `check.exe` in live memory while actively running).
+A clean demonstration of static binary file HEX patching on a compiled Windows executable with XOR-hashed password/license authentication.
 
 ---
 
-## 📌 Project Overview
+## 📌 Project Overview & Real-World Use Case
 
-- **`check.exe`**: Target application that authenticates user input against a 32-bit XOR hash stored in `.data`. The plaintext password `"s3cr3t"` does not exist in the binary file or memory.
-- **`patcher.exe`**: Static file patcher that opens `check.exe` using standard file I/O (`fopen`, `fseek`, `fwrite`) and updates the stored hash bytes permanently on disk.
-- **`live_patcher.exe`**: Dynamic RAM patcher that attaches to the running `check.exe` process and updates the stored hash in live memory using `WriteProcessMemory`.
+This project simulates a real-world software licensing and device-binding workflow:
+1. **The Software Template (`check.exe`)**: A software vendor compiles a single generic executable template that validates a user password or client Hardware Device ID against an embedded XOR hash in the `.data` section.
+2. **The Customizer Tool (`patcher.exe`)**: When a customer purchases the software and provides their specific Device ID or password, the vendor runs `patcher.exe` to inspect the binary HEX of `check.exe` on disk, calculate the XOR hash of the customer's credential, and overwrite the embedded HEX bytes directly in the file.
+3. **The Customized Binary**: When the client receives and executes `check.exe`, the file on disk is permanently customized to only unlock with their specific Hardware ID or password.
 
 ---
 
-## 🚀 Quick Start (Compilation)
+## 🚀 Quick Start (Build & Run)
 
+### 1. Compile Both Binaries
 ```powershell
 gcc -o check.exe src/check.c
 gcc -o patcher.exe src/patcher.c
-gcc -o live_patcher.exe src/live_patcher.c
 ```
 
----
-
-## 🧪 Option 1: Static File Patching (Disk)
-
-Use this method to permanently change the password in the `.exe` file on disk.
-
+### 2. Test Original Executable
 ```powershell
-# 1. Verify original password
 echo s3cr3t | ./check.exe
-# Output: Access Granted
+# Output: Access Granted! Software unlocked.
 
-# 2. Patch check.exe to accept "mypass"
-./patcher.exe check.exe mypass
-# Output: Patched offset 0x8000: 287671138 -> 4216307715
-
-# 3. Verify new password
 echo mypass | ./check.exe
-# Output: Access Granted
-
-echo s3cr3t | ./check.exe
-# Output: Access Denied
+# Output: Access Denied! Invalid credentials.
 ```
 
----
-
-## ⚡ Option 2: Dynamic RAM Patching (Live Process)
-
-Use this method to change the password in live memory while `check.exe` is actively running.
-
-### Terminal 1 (Start the target program):
+### 3. Patch the Binary File on Disk
 ```powershell
-.\check.exe
-```
-- Type: `s3cr3t` $\rightarrow$ `Access Granted`
-- Type: `mypass` $\rightarrow$ `Access Denied`
-
-### Terminal 2 (Run the live patcher while check.exe is still open):
-```powershell
-.\live_patcher.exe mypass
+./patcher.exe check.exe mypass
 ```
 ```text
-=== Dynamic Runtime Memory Patcher (XOR Hash) ===
+============================================================
+        Binary File HEX Patcher (Software Customizer)       
+============================================================
 
-Target Process: check.exe
-[1] Found running check.exe (PID 22452)
-[2] Located stored_hash in RAM @ 00007FF7C9199000
-[3] Overwrote RAM: 287671138 -> 4216307715
-=== SUCCESS ===
+Target File:  check.exe
+New Password: "mypass"
+New Hash:     4216307715 (Hex: 0xFB4FC003)
+
+[*] Found stored hash in .data section at File Offset: 0x8000
+    OLD HEX Bytes:  62 83 25 11  (Hash: 287671138 / 0x11258362)
+    NEW HEX Bytes:  03 C0 4F FB  (Hash: 4216307715 / 0xFB4FC003)
+
+============================================================
+>>> SUCCESS: check.exe has been permanently patched on disk!
+>>> Now run "check.exe" and enter "mypass" to unlock!
+============================================================
 ```
 
-### Return to Terminal 1:
-- Type: `mypass` $\rightarrow$ **`Access Granted`** (takes effect immediately without restarting!)
-- Type: `s3cr3t` $\rightarrow$ **`Access Denied`**
+### 4. Verify That `check.exe` is Permanently Changed
+```powershell
+echo mypass | ./check.exe
+# Output: Access Granted! Software unlocked.
+
+echo s3cr3t | ./check.exe
+# Output: Access Denied! Invalid credentials.
+```
+
+### 5. Patch with a Hardware Device ID (Customer License)
+```powershell
+./patcher.exe check.exe DEVICE_HWID_9981
+
+echo DEVICE_HWID_9981 | ./check.exe
+# Output: Access Granted! Software unlocked.
+```
 
 ---
 
-## 🔍 How the Reverse Engineering Works
+## 🔍 How It Works (The 3 Steps)
 
-### 1. Assembly Analysis of `check.exe`
-Inspecting `check.exe` in assembly reveals the XOR hashing loop and the stored hash value:
+### Step 1: Known Hash Algorithm & Assembly Inspection
+`check.exe` calculates the hash of user input using a known, classical XOR hash:
+$$\text{hash}_{n} = (\text{hash}_{n-1} \times 31) \oplus \text{ASCII}(c) \quad \text{with seed } \text{hash}_0 = \texttt{0x5A}$$
 
+In the assembly of `check.exe`, this corresponds to:
 ```assembly
-mov     eax, 5Ah             ; hash = 0x5A (initial seed)
+mov     eax, 5Ah             ; hash = 0x5A
 .loop:
 movzx   ecx, byte ptr [rdi]  ; c = *str
 test    ecx, ecx             ; check for null terminator '\0'
@@ -95,20 +91,27 @@ inc     rdi                  ; str++
 jmp     .loop
 ```
 
-- **Hash Formula**: $\text{hash}_{n} = (\text{hash}_{n-1} \times 31) \oplus \text{ASCII}(c)$ starting with seed `0x5A`.
-- **Stored Hash Constant**: `287671138` (`0x11258362`) in the `.data` section.
+### Step 2: Hash Calculation
+`patcher.exe` computes the XOR hash for the new password or Device ID:
+- For `"s3cr3t"`: $\text{Hash} = 287671138 \implies \text{Hex: } \texttt{0x11258362} \implies \text{Bytes: } \texttt{62 83 25 11}$
+- For `"mypass"`: $\text{Hash} = 4216307715 \implies \text{Hex: } \texttt{0xFB4FC003} \implies \text{Bytes: } \texttt{03 C0 4F FB}$
+- For `"DEVICE_HWID_9981"`: $\text{Hash} = 929471645 \implies \text{Hex: } \texttt{0x37669C9D} \implies \text{Bytes: } \texttt{9D 9C 66 37}$
 
-### 2. Hash Calculation
-For the new password `"mypass"`:
-$$\text{XOR\_hash}("mypass") = 4216307715 \quad (\text{Hex: } \texttt{0xFB4FC003})$$
+### Step 3: Direct Binary HEX Modification
+`patcher.exe` opens `check.exe` as a raw binary file on disk (`fopen("check.exe", "rb+")`):
+1. Reads the PE section table to locate the `.data` section at file offset `0x8000`.
+2. Locates the 4-byte hash scalar.
+3. Overwrites the 4 HEX bytes directly in the file on disk using `fwrite()`.
+4. Closes the file.
+
+When `check.exe` is run at any point in the future, it loads the new hash bytes directly from `.data`.
 
 ---
 
-## 📁 Repository Layout
+## 📁 Repository Structure
 
 | File | Description |
 |---|---|
-| [`src/check.c`](src/check.c) | Target binary with XOR-hashed password verification loop. |
-| [`src/patcher.c`](src/patcher.c) | Static file patcher modifying `check.exe` bytes on disk (`fopen`/`fwrite`). |
-| [`src/live_patcher.c`](src/live_patcher.c) | Dynamic memory patcher modifying running process RAM (`WriteProcessMemory`). |
-| [`docs/report.md`](docs/report.md) | Full academic report detailing PE structure, assembly analysis, and both patchers. |
+| [`src/check.c`](src/check.c) | Target executable template with XOR hash authentication. |
+| [`src/patcher.c`](src/patcher.c) | Binary HEX file patcher that updates the embedded hash in `check.exe` on disk. |
+| [`docs/report.md`](docs/report.md) | Full academic report detailing the use case, PE format, and verification logs. |

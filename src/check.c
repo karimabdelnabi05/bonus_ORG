@@ -1,14 +1,14 @@
 /*
- * check.c - Target program with simple XOR hash authentication
+ * check.c - Target program with hashed password / license verification
  *
- * Password storage uses a simple XOR-based hash function.
- * Plaintext password "s3cr3t" is not stored in the binary.
+ * This program simulates a protected software executable.
+ * Instead of storing plaintext passwords, it stores an XOR hash
+ * inside the binary's .data section.
  *
- * Stored hash for "s3cr3t": 287671138 (0x11258362)
+ * When executed, it hashes the user input and compares it against
+ * the stored hash.
  *
- * Runs in a loop so you can test both:
- *   1. Static file patching (before running)
- *   2. Live RAM patching (while running)
+ * Default Password: "s3cr3t" -> Hash: 287671138 (0x11258362)
  *
  * Compile: gcc -o check.exe src/check.c
  */
@@ -25,31 +25,25 @@ static unsigned long hash_password(const char *str) {
     return hash;
 }
 
-/* Stored XOR hash of "s3cr3t" in the .data section (volatile so RAM changes take effect) */
-volatile unsigned long stored_hash = 287671138UL;
+/* Stored hash located in the .data section of the binary */
+unsigned long stored_hash = 287671138UL;
 
 int main(void) {
     char input[256];
 
-    printf("=== Password Verification Terminal ===\n");
-    printf("(Press Ctrl+C to exit)\n\n");
+    printf("=== Software Authentication Terminal ===\n");
+    printf("Enter Password / Device ID: ");
+    if (!fgets(input, sizeof(input), stdin))
+        return 0;
 
-    while (1) {
-        printf("Enter password: ");
-        fflush(stdout);
+    /* Strip newline characters */
+    input[strcspn(input, "\r\n")] = '\0';
 
-        if (!fgets(input, sizeof(input), stdin))
-            break;
-
-        /* Remove trailing newline */
-        input[strcspn(input, "\r\n")] = '\0';
-
-        /* Compare computed input hash against stored hash */
-        if (hash_password(input) == stored_hash) {
-            printf("Access Granted\n\n");
-        } else {
-            printf("Access Denied\n\n");
-        }
+    /* Validate input hash against embedded stored hash */
+    if (hash_password(input) == stored_hash) {
+        printf("Access Granted! Software unlocked.\n");
+    } else {
+        printf("Access Denied! Invalid credentials.\n");
     }
 
     return 0;
