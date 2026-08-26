@@ -114,4 +114,5 @@ When `check.exe` is run at any point in the future, it loads the new hash bytes 
 |---|---|
 | [`src/check.c`](src/check.c) | Target executable template with XOR hash authentication. |
 | [`src/patcher.c`](src/patcher.c) | Binary HEX file patcher that updates the embedded hash in `check.exe` on disk. |
+| [`docs/code-explanation.md`](docs/code-explanation.md) | Exhaustive line-by-line breakdown and explanation of `patcher.c`. |
 | [`docs/report.md`](docs/report.md) | Full academic report detailing the use case, PE format, and verification logs. |
