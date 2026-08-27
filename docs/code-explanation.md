@@ -23,7 +23,7 @@ It explains the purpose of every variable, system call, and algorithm used to pa
 
 ## Overview and Objective
 
-The goal of `patcher.c` is to modify a compiled executable (`check.exe`) directly on disk so that it accepts a new password or Hardware Device ID.
+The goal of `patcher.c` is to modify a compiled executable (`check.exe`) directly on disk so that it accepts a new password.
 It does this without needing the original source code, without recompiling, and without running `check.exe` in the background.
 
 ---
@@ -114,7 +114,7 @@ int main(int argc, char *argv[]) {
 
 ```c
     printf("============================================================\n");
-    printf("        Binary File HEX Patcher (Software Customizer)       \n");
+    printf("                  Binary File HEX Patcher                   \n");
     printf("============================================================\n\n");
     printf("Target File:  %s\n", target_path);
     printf("New Password: \"%s\"\n", new_password);
@@ -328,7 +328,7 @@ int main(int argc, char *argv[]) {
 
     printf("============================================================\n");
     printf(">>> SUCCESS: %s has been permanently patched on disk!\n", target_path);
-    printf(">>> Now run \"%s\" and enter \"%s\" to unlock!\n", target_path, new_password);
+    printf(">>> Now run \"%s\" and enter \"%s\" to verify Access Granted!\n", target_path, new_password);
     printf("============================================================\n");
 
     return 0;

@@ -1,12 +1,5 @@
 /*
- * patcher.c - Binary File HEX Patcher for Password / Device-ID Customization
- *
- * Real-World Use Case:
- *   Software vendors distribute pre-compiled binary templates (e.g. check.exe).
- *   When a client purchases the software, the vendor customizes the executable
- *   by patching the binary HEX on disk with the client's Hardware Device ID
- *   or chosen password hash.
- *   When the client opens the patched .exe, it accepts their specific credentials.
+ * patcher.c - Binary File HEX Password Patcher
  *
  * How it works:
  *   1. Opens the target .exe file directly on disk in binary read/write mode.
@@ -46,7 +39,7 @@ int main(int argc, char *argv[]) {
     unsigned long new_hash = xor_hash(new_password);
 
     printf("============================================================\n");
-    printf("        Binary File HEX Patcher (Software Customizer)       \n");
+    printf("                  Binary File HEX Patcher                   \n");
     printf("============================================================\n\n");
     printf("Target File:  %s\n", target_path);
     printf("New Password: \"%s\"\n", new_password);
@@ -152,7 +145,7 @@ int main(int argc, char *argv[]) {
 
     printf("============================================================\n");
     printf(">>> SUCCESS: %s has been permanently patched on disk!\n", target_path);
-    printf(">>> Now run \"%s\" and enter \"%s\" to unlock!\n", target_path, new_password);
+    printf(">>> Now run \"%s\" and enter \"%s\" to verify Access Granted!\n", target_path, new_password);
     printf("============================================================\n");
 
     return 0;

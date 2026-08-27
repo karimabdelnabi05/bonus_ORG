@@ -1,21 +1,18 @@
-# Academic Report: Static Binary File HEX Patching for Software Customization
+# Academic Report: Static Binary File HEX Password Patching
 
-## 1. Executive Summary and Motivation
+## 1. Executive Summary
 
 This report demonstrates static binary file patching on a compiled Windows Portable Executable (`check.exe`).
-In real-world software distribution, software vendors often build a single pre-compiled binary template.
-To lock the software to a specific customer or physical machine, the vendor customizes the executable file before delivery by embedding the hash of the customer's Hardware Device ID or license key directly into the binary file on disk.
-
-In this project:
-1. `check.exe` is the protected software application that validates input against an embedded 32-bit XOR hash in the `.data` section.
-2. `patcher.exe` is the binary customizer that inspects the raw HEX bytes of `check.exe` on disk, calculates the XOR hash of the desired new password or Device ID, and overwrites the stored hash bytes in the executable file.
-3. Once patched, `check.exe` is permanently modified on disk and unlocks exclusively with the newly configured credentials.
+The target program authenticates passwords using a 32-bit XOR hash algorithm, ensuring that the plaintext password (`"s3cr3t"`) is absent from the binary file and memory.
+Using the known XOR hash algorithm, a lightweight C patcher (`patcher.exe`) was implemented.
+The patcher opens `check.exe` on disk, calculates the hash of a new password, locates the embedded hash bytes in the `.data` section, and overwrites them directly in the binary HEX format.
+Once patched, `check.exe` is permanently modified on disk to accept the new password.
 
 ---
 
 ## 2. Target Executable Architecture (`check.exe`)
 
-The target program performs authentication using a known 32-bit XOR hash algorithm:
+The target program performs authentication using a 32-bit XOR hash algorithm:
 
 ```c
 #include <stdio.h>
@@ -35,15 +32,15 @@ unsigned long stored_hash = 287671138UL;
 
 int main(void) {
     char input[256];
-    printf("=== Software Authentication Terminal ===\n");
-    printf("Enter Password / Device ID: ");
+    printf("=== Password Verification Terminal ===\n");
+    printf("Enter Password: ");
     if (!fgets(input, sizeof(input), stdin)) return 0;
     input[strcspn(input, "\r\n")] = '\0';
 
     if (hash_password(input) == stored_hash) {
-        printf("Access Granted! Software unlocked.\n");
+        printf("Access Granted\n");
     } else {
-        printf("Access Denied! Invalid credentials.\n");
+        printf("Access Denied\n");
     }
     return 0;
 }
@@ -51,7 +48,7 @@ int main(void) {
 
 ### Security Properties
 - The plaintext password (`"s3cr3t"`) is absent from the binary file and memory.
-- The comparison compares two 32-bit integer registers (`cmp eax, ecx`).
+- The comparison evaluates two 32-bit integer registers (`cmp eax, ecx`).
 - The stored hash scalar lives in the initialized data section (`.data`).
 
 ---
@@ -62,7 +59,7 @@ In the Windows PE (Portable Executable) format, sections divide executable machi
 
 | Section | Purpose | Permissions | Content in `check.exe` |
 |---|---|---|---|
-| `.text` | Machine Code | Read / Execute | `main` and `hash_password` instructions |
+| `.text` | Machine Code | Read / Execute | `main` and `hash_password` CPU instructions |
 | `.rdata` | Read-Only Data | Read-Only | Prompt strings and status messages |
 | `.data` | Initialized Globals | Read / Write | `stored_hash = 287671138` (Little-endian bytes: `62 83 25 11`) |
 
@@ -94,8 +91,8 @@ jmp     .loop
   $$\text{Hash} = 287671138 \implies \text{Hex: } \texttt{0x11258362} \implies \text{Little-Endian Bytes: } \texttt{62 83 25 11}$$
 - Custom Password `"mypass"`:
   $$\text{Hash} = 4216307715 \implies \text{Hex: } \texttt{0xFB4FC003} \implies \text{Little-Endian Bytes: } \texttt{03 C0 4F FB}$$
-- Hardware Device ID `"DEVICE_HWID_9981"`:
-  $$\text{Hash} = 929471645 \implies \text{Hex: } \texttt{0x37669C9D} \implies \text{Little-Endian Bytes: } \texttt{9D 9C 66 37}$$
+- Custom Password `"newpass2026"`:
+  $$\text{Hash} = 3493721389 \implies \text{Hex: } \texttt{0xD03E0D2D} \implies \text{Little-Endian Bytes: } \texttt{2D 0D 3E D0}$$
 
 ---
 
@@ -175,15 +172,15 @@ int main(int argc, char *argv[]) {
 ```text
 === 1. Test original executable on disk ===
 > echo s3cr3t | check.exe
-Access Granted! Software unlocked.
+Access Granted
 
 > echo mypass | check.exe
-Access Denied! Invalid credentials.
+Access Denied
 
 === 2. Run patcher on disk ===
 > patcher.exe check.exe mypass
 ============================================================
-        Binary File HEX Patcher (Software Customizer)       
+                  Binary File HEX Patcher                   
 ============================================================
 Target File:  check.exe
 New Password: "mypass"
@@ -199,24 +196,24 @@ New Hash:     4216307715 (Hex: 0xFB4FC003)
 
 === 3. Verify check.exe is permanently modified ===
 > echo mypass | check.exe
-Access Granted! Software unlocked.
+Access Granted
 
 > echo s3cr3t | check.exe
-Access Denied! Invalid credentials.
+Access Denied
 
-=== 4. Re-patch with Hardware Device ID ===
-> patcher.exe check.exe DEVICE_HWID_9981
+=== 4. Re-patch with another password ===
+> patcher.exe check.exe newpass2026
 [*] Found stored hash at File Offset: 0x8000
     OLD HEX Bytes:  03 C0 4F FB  (Hash: 4216307715)
-    NEW HEX Bytes:  9D 9C 66 37  (Hash: 929471645)
+    NEW HEX Bytes:  2D 0D 3E D0  (Hash: 3493721389)
 
-> echo DEVICE_HWID_9981 | check.exe
-Access Granted! Software unlocked.
+> echo newpass2026 | check.exe
+Access Granted
 ```
 
 ---
 
 ## 7. Conclusion
 
-This project illustrates the principles of static binary customization and licensing.
-By reading the executable as a raw binary file, locating initialized variables within the PE `.data` section, and writing computed hash bytes directly to disk, compiled binaries can be modified and distributed without recompiling the original source code.
+This project demonstrates the principles of static binary modification.
+By reading the executable as a raw binary file, locating initialized variables within the PE `.data` section, and writing computed hash bytes directly to disk, compiled binaries can be modified and updated without recompiling the original source code.

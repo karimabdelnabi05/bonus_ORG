@@ -1,12 +1,9 @@
 /*
- * check.c - Target program with hashed password / license verification
+ * check.c - Target program with hashed password verification
  *
- * This program simulates a protected software executable.
- * Instead of storing plaintext passwords, it stores an XOR hash
- * inside the binary's .data section.
- *
- * When executed, it hashes the user input and compares it against
- * the stored hash.
+ * This program validates a password against an XOR hash
+ * stored inside the binary's .data section.
+ * The plaintext password is not stored in the binary.
  *
  * Default Password: "s3cr3t" -> Hash: 287671138 (0x11258362)
  *
@@ -31,8 +28,8 @@ unsigned long stored_hash = 287671138UL;
 int main(void) {
     char input[256];
 
-    printf("=== Software Authentication Terminal ===\n");
-    printf("Enter Password / Device ID: ");
+    printf("=== Password Verification Terminal ===\n");
+    printf("Enter Password: ");
     if (!fgets(input, sizeof(input), stdin))
         return 0;
 
@@ -41,9 +38,9 @@ int main(void) {
 
     /* Validate input hash against embedded stored hash */
     if (hash_password(input) == stored_hash) {
-        printf("Access Granted! Software unlocked.\n");
+        printf("Access Granted\n");
     } else {
-        printf("Access Denied! Invalid credentials.\n");
+        printf("Access Denied\n");
     }
 
     return 0;
