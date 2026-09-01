@@ -26,8 +26,8 @@ static unsigned long hash_password(const char *str) {
 
 /* Stored authentication structure: both tag and password are 4-byte hashes */
 struct AuthData {
-    unsigned long tag_hash;     /* Hashed identifier: xor_hash("PASSTAG") */
-    unsigned long stored_hash;  /* 4-byte stored password hash */
+    unsigned long tag_hash;     /* Hashed identifier: xor_hash("PASSTAG") -> 192292035 */
+    unsigned long stored_hash;  /* 4-byte stored password hash           -> 287671138 */
 };
 
 struct AuthData auth = {
