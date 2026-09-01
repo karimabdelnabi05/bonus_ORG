@@ -1,53 +1,59 @@
-# Comprehensive Line-by-Line Explanation of `patcher.c`
+# Comprehensive Line-by-Line Explanation of `patcher.c` (Identifier Tag Method)
 
 This document provides an exhaustive, line-by-line breakdown of [`src/patcher.c`](../src/patcher.c).
-It explains the purpose of every variable, system call, and algorithm used to patch a Windows executable on disk.
+It explains the purpose of every variable, system call, and algorithm used to locate the magic identifier tag (`"PASSTAG_"`) and patch the adjacent password hash in a Windows executable on disk.
 
 ---
 
 ## 📑 Table of Contents
 1. [Overview and Objective](#overview-and-objective)
-2. [Lines 24-26: Header Inclusions](#lines-24-26-header-inclusions)
-3. [Lines 28-35: The Known XOR Hash Algorithm](#lines-28-35-the-known-xor-hash-algorithm)
-4. [Lines 37-46: Program Entry and Input Validation](#lines-37-46-program-entry-and-input-validation)
-5. [Lines 48-53: Diagnostic Console Output](#lines-48-53-diagnostic-console-output)
-6. [Lines 55-60: Opening the Binary File on Disk](#lines-55-60-opening-the-binary-file-on-disk)
-7. [Lines 62-73: Reading the Entire File into RAM](#lines-62-73-reading-the-entire-file-into-ram)
-8. [Lines 75-108: Parsing the Windows PE Header](#lines-75-108-parsing-the-windows-pe-header)
-9. [Lines 110-128: Locating the Stored Hash Inside `.data`](#lines-110-128-locating-the-stored-hash-inside-data)
-10. [Lines 130-144: Little-Endian Conversion and HEX Output](#lines-130-144-little-endian-conversion-and-hex-output)
-11. [Lines 146-159: Overwriting File Bytes and Finalizing](#lines-146-159-overwriting-file-bytes-and-finalizing)
-12. [Key Concepts Summary](#key-concepts-summary)
+2. [Lines 24-30: Header Inclusions and Constants](#lines-24-30-header-inclusions-and-constants)
+3. [Lines 32-39: The Known XOR Hash Algorithm](#lines-32-39-the-known-xor-hash-algorithm)
+4. [Lines 41-50: Program Entry and Input Validation](#lines-41-50-program-entry-and-input-validation)
+5. [Lines 52-58: Diagnostic Console Output](#lines-52-58-diagnostic-console-output)
+6. [Lines 60-65: Opening the Binary File on Disk](#lines-60-65-opening-the-binary-file-on-disk)
+7. [Lines 67-78: Reading the Entire File into RAM](#lines-67-78-reading-the-entire-file-into-ram)
+8. [Lines 80-95: Scanning for the Magic Identifier Tag](#lines-80-95-scanning-for-the-magic-identifier-tag)
+9. [Lines 97-117: Little-Endian Conversion and Diagnostic Display](#lines-97-117-little-endian-conversion-and-diagnostic-display)
+10. [Lines 119-132: Overwriting File Bytes on Disk and Cleanup](#lines-119-132-overwriting-file-bytes-on-disk-and-cleanup)
+11. [Key Concepts Summary](#key-concepts-summary)
 
 ---
 
 ## Overview and Objective
 
-The goal of `patcher.c` is to modify a compiled executable (`check.exe`) directly on disk so that it accepts a new password.
-It does this without needing the original source code, without recompiling, and without running `check.exe` in the background.
+The goal of `patcher.c` is to locate the exact position of the password hash in `check.exe` by searching for a unique 8-byte anchor tag (`"PASSTAG_"`).
+Once the tag is found, the 4 bytes immediately following the tag (`tag_offset + 8`) are replaced with the XOR hash of the new password.
+This eliminates any need to hardcode file addresses or parse complex PE section headers.
 
 ---
 
-## Lines 24-26: Header Inclusions
+## Lines 24-30: Header Inclusions and Constants
 
 ```c
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The 8-byte magic identifier placed before the stored hash */
+#define MAGIC_TAG "PASSTAG_"
+#define TAG_LEN 8
 ```
 
 - **Line 24 (`#include <stdio.h>`)**:
-  Includes the Standard Input/Output library.
-  Provides file operations (`fopen`, `fseek`, `ftell`, `fread`, `fwrite`, `fclose`) and console printing (`printf`).
+  Provides file operations (`fopen`, `fseek`, `ftell`, `fread`, `fwrite`, `fclose`) and console output (`printf`).
 - **Line 25 (`#include <stdlib.h>`)**:
-  Includes the Standard General Utilities library.
-  Provides dynamic memory management (`malloc`, `free`).
+  Provides dynamic memory allocation (`malloc`, `free`).
 - **Line 26 (`#include <string.h>`)**:
-  Includes string and memory manipulation functions (`strcmp`, `memcpy`).
+  Provides memory comparison functions (`memcmp`, `memcpy`).
+- **Line 29 (`#define MAGIC_TAG "PASSTAG_"`)**:
+  Defines the 8-byte string identifier that marks the position of the password hash in the binary.
+- **Line 30 (`#define TAG_LEN 8`)**:
+  Defines the length of the tag in bytes.
 
 ---
 
-## Lines 28-35: The Known XOR Hash Algorithm
+## Lines 32-39: The Known XOR Hash Algorithm
 
 ```c
 /* Known XOR hash function: (hash * 31) ^ character (initial seed: 0x5A) */
@@ -60,25 +66,22 @@ static unsigned long xor_hash(const char *str) {
 }
 ```
 
-- **Line 29 (`static unsigned long xor_hash(const char *str)`)**:
-  Defines the hash calculation function.
-  It takes a pointer to a string (`str`) and returns a 32-bit unsigned long integer.
-- **Line 30 (`unsigned long hash = 0x5A;`)**:
-  Initializes the accumulator with the starting seed value `0x5A` (`90` in decimal).
-- **Line 31 (`int c;`)**:
-  Declares variable `c` to hold the ASCII integer value of each character during iteration.
-- **Line 32 (`while ((c = *str++))`)**:
-  Iterates through the string character by character.
-  In each step, `*str++` reads the current character into `c` and advances the pointer.
-  When it hits the null terminator `\0` (ASCII 0), the loop terminates.
-- **Line 33 (`hash = (hash * 31) ^ (unsigned char)c;`)**:
-  Applies the mathematical hash formula: multiplies current hash by 31 and bitwise XORs with character `c`.
-- **Line 34 (`return hash;`)**:
-  Returns the final 32-bit hash value.
+- **Line 33 (`static unsigned long xor_hash(const char *str)`)**:
+  Defines the hash calculation function returning a 32-bit unsigned integer.
+- **Line 34 (`unsigned long hash = 0x5A;`)**:
+  Initializes the accumulator with starting seed `0x5A` (`90` in decimal).
+- **Line 35 (`int c;`)**:
+  Declares variable `c` to hold the ASCII value of each character during iteration.
+- **Line 36 (`while ((c = *str++))`)**:
+  Loops character by character through the string until reaching the null terminator `\0`.
+- **Line 37 (`hash = (hash * 31) ^ (unsigned char)c;`)**:
+  Applies the recurrence formula: multiplies by 31 and bitwise XORs with character `c`.
+- **Line 38 (`return hash;`)**:
+  Returns the computed 32-bit hash scalar.
 
 ---
 
-## Lines 37-46: Program Entry and Input Validation
+## Lines 41-50: Program Entry and Input Validation
 
 ```c
 int main(int argc, char *argv[]) {
@@ -93,40 +96,38 @@ int main(int argc, char *argv[]) {
     unsigned long new_hash = xor_hash(new_password);
 ```
 
-- **Line 37 (`int main(int argc, char *argv[])`)**:
-  Standard entry point of the program.
-  `argc` is argument count, `argv` is the array of argument strings.
-- **Line 38 (`if (argc != 3)`)**:
-  Checks if the user provided the correct number of command-line arguments.
-  `argc` must be 3 (`argv[0]` = program name, `argv[1]` = target executable, `argv[2]` = new password).
-- **Lines 39-41**:
-  Prints usage instructions and exits with return code `1` if arguments are missing.
-- **Line 44 (`const char *target_path = argv[1];`)**:
-  Stores the path to the target executable (e.g. `"check.exe"`).
-- **Line 45 (`const char *new_password = argv[2];`)**:
-  Stores the desired new password string (e.g. `"mypass"`).
-- **Line 46 (`unsigned long new_hash = xor_hash(new_password);`)**:
-  Computes the 32-bit XOR hash of the new password immediately.
+- **Line 41 (`int main(int argc, char *argv[])`)**:
+  Entry point of the program.
+- **Line 42 (`if (argc != 3)`)**:
+  Validates that exactly two arguments were passed (`argv[1]` = target executable, `argv[2]` = new password).
+- **Lines 43-45**:
+  Prints usage instructions and exits with code `1` if arguments are missing.
+- **Line 47 (`target_path = argv[1];`)**:
+  Stores target executable path string.
+- **Line 48 (`new_password = argv[2];`)**:
+  Stores new password string.
+- **Line 49 (`new_hash = xor_hash(new_password);`)**:
+  Computes the 32-bit hash for the new password.
 
 ---
 
-## Lines 48-53: Diagnostic Console Output
+## Lines 52-58: Diagnostic Console Output
 
 ```c
     printf("============================================================\n");
-    printf("                  Binary File HEX Patcher                   \n");
+    printf("        Binary File HEX Patcher (Identifier Tag Method)     \n");
     printf("============================================================\n\n");
     printf("Target File:  %s\n", target_path);
+    printf("Identifier:   \"%s\" (%d bytes)\n", MAGIC_TAG, TAG_LEN);
     printf("New Password: \"%s\"\n", new_password);
     printf("New Hash:     %lu (Hex: 0x%08lX)\n\n", new_hash, new_hash);
 ```
 
-- **Lines 48-50**: Prints a title banner to the console.
-- **Lines 51-53**: Displays the target file name, new password, and computed hash in decimal and hexadecimal format (`%lu` and `0x%08lX`).
+- Displays diagnostic information including target file, search tag name, new password, and computed hash.
 
 ---
 
-## Lines 55-60: Opening the Binary File on Disk
+## Lines 60-65: Opening the Binary File on Disk
 
 ```c
     /* Step 1: Open the binary file on disk */
@@ -137,19 +138,14 @@ int main(int argc, char *argv[]) {
     }
 ```
 
-- **Line 56 (`FILE *f = fopen(target_path, "rb+");`)**:
-  Opens `check.exe` in **binary read/write update mode (`"rb+"`)**.
-  - `r`: Read from the existing file.
-  - `b`: Binary mode (prevents Windows newline `\r\n` translation).
-  - `+`: Allows writing back changes to the exact same file without recreating it.
-- **Line 57 (`if (!f)`)**:
-  Error checking to verify the file was successfully opened.
-- **Lines 58-59**:
-  Prints an error message and terminates if the file does not exist or is locked.
+- **Line 61 (`FILE *f = fopen(target_path, "rb+");`)**:
+  Opens the file in **binary update mode (`"rb+"`)** allowing both reading and in-place writing.
+- **Lines 62-65**:
+  Error checking to verify the file was opened successfully.
 
 ---
 
-## Lines 62-73: Reading the Entire File into RAM
+## Lines 67-78: Reading the Entire File into RAM
 
 ```c
     /* Step 2: Read entire binary into memory */
@@ -166,127 +162,53 @@ int main(int argc, char *argv[]) {
     fread(data, 1, file_size, f);
 ```
 
-- **Line 63 (`fseek(f, 0, SEEK_END);`)**:
-  Moves the file read cursor to the very last byte of the file.
-- **Line 64 (`long file_size = ftell(f);`)**:
-  Queries the cursor position, giving the exact file size in bytes (e.g. `271,188` bytes).
-- **Line 65 (`fseek(f, 0, SEEK_SET);`)**:
-  Rewinds the file cursor back to the beginning (`offset 0`).
-- **Line 67 (`unsigned char *data = (unsigned char *)malloc(file_size);`)**:
-  Allocates a temporary heap buffer of size `file_size` to hold the raw binary bytes.
-- **Lines 68-72**:
-  Checks if `malloc` succeeded; closes file and exits if out of memory.
-- **Line 73 (`fread(data, 1, file_size, f);`)**:
-  Reads all bytes of `check.exe` from disk into the `data` memory buffer for inspection.
+- **Line 68 (`fseek(f, 0, SEEK_END);`)**: Moves cursor to the end of the file.
+- **Line 69 (`long file_size = ftell(f);`)**: Obtains total byte count of the file.
+- **Line 70 (`fseek(f, 0, SEEK_SET);`)**: Rewinds cursor to byte 0.
+- **Line 72 (`malloc(file_size);`)**: Allocates RAM buffer to hold file contents.
+- **Line 78 (`fread(data, 1, file_size, f);`)**: Reads all binary bytes into memory for fast searching.
 
 ---
 
-## Lines 75-108: Parsing the Windows PE Header
+## Lines 80-95: Scanning for the Magic Identifier Tag
 
 ```c
-    /* Step 3: Parse PE headers to locate the .data section */
-    if (data[0] != 'M' || data[1] != 'Z') {
-        printf("ERROR: Not a valid Windows PE executable (missing MZ header).\n");
-        free(data);
-        fclose(f);
-        return 1;
-    }
-
-    unsigned long pe_offset = *(unsigned long *)(data + 0x3C);
-    unsigned short num_sections = *(unsigned short *)(data + pe_offset + 6);
-    unsigned short opt_hdr_size = *(unsigned short *)(data + pe_offset + 20);
-    unsigned long sections_start = pe_offset + 24 + opt_hdr_size;
-
-    long data_file_offset = -1;
-    long data_size = 0;
-
-    for (int i = 0; i < num_sections; i++) {
-        unsigned char *sec = data + sections_start + (i * 40);
-        char name[9] = {0};
-        memcpy(name, sec, 8);
-
-        if (strcmp(name, ".data") == 0) {
-            data_size = *(unsigned long *)(sec + 16);
-            data_file_offset = *(unsigned long *)(sec + 20);
+    /* Step 3: Scan the binary file for the MAGIC_TAG identifier */
+    long tag_offset = -1;
+    for (long i = 0; i <= file_size - TAG_LEN - 4; i++) {
+        if (memcmp(data + i, MAGIC_TAG, TAG_LEN) == 0) {
+            tag_offset = i;
             break;
         }
     }
 
-    if (data_file_offset < 0) {
-        printf("ERROR: .data section not found in PE binary.\n");
+    if (tag_offset < 0) {
+        printf("ERROR: Magic identifier \"%s\" not found in \"%s\".\n", MAGIC_TAG, target_path);
         free(data);
         fclose(f);
         return 1;
     }
 ```
 
-- **Lines 76-81**:
-  Validates the DOS Header magic bytes `MZ` (`0x4D 0x5A`) at bytes 0 and 1.
-- **Line 83 (`pe_offset = *(unsigned long *)(data + 0x3C);`)**:
-  In Windows PE files, offset `0x3C` (`e_lfanew`) stores the 4-byte pointer to the PE signature (`PE\0\0`).
-- **Line 84 (`num_sections = *(unsigned short *)(data + pe_offset + 6);`)**:
-  Reads the number of sections (e.g. `.text`, `.data`, `.rdata`) from the COFF header.
-- **Line 85 (`opt_hdr_size = *(unsigned short *)(data + pe_offset + 20);`)**:
-  Reads the size of the Optional Header.
-- **Line 86 (`sections_start = pe_offset + 24 + opt_hdr_size;`)**:
-  Calculates the exact byte offset where the Section Header Table begins.
-- **Lines 91-101 (`for (int i = 0; i < num_sections; i++)`)**:
-  Iterates through each 40-byte section header entry:
-  - `sec = data + sections_start + (i * 40)`: Points to the current 40-byte section entry.
-  - `memcpy(name, sec, 8)`: Copies the 8-byte section name string.
-  - `if (strcmp(name, ".data") == 0)`: When the `.data` section is found:
-    - `data_size`: Read from offset `+16` (`SizeOfRawData`).
-    - `data_file_offset`: Read from offset `+20` (`PointerToRawData` — file offset `0x8000`).
-- **Lines 103-108**:
-  Validates that `.data` was found; exits if missing.
+- **Line 81 (`long tag_offset = -1;`)**: Initializes tag location to `-1` (not found).
+- **Line 82 (`for (long i = 0; i <= file_size - TAG_LEN - 4; i++)`)**:
+  Scans linearly through the binary buffer byte by byte.
+- **Line 83 (`if (memcmp(data + i, MAGIC_TAG, TAG_LEN) == 0)`)**:
+  Compares 8 bytes at current position with `"PASSTAG_"`.
+  When a match is found, records the file offset in `tag_offset` and breaks the loop.
+- **Lines 89-94**:
+  Error checking to verify the identifier was found.
 
 ---
 
-## Lines 110-128: Locating the Stored Hash Inside `.data`
+## Lines 97-117: Little-Endian Conversion and Diagnostic Display
 
 ```c
-    /* Step 4: Find the stored hash location in .data section */
-    long patch_offset = -1;
-    unsigned long old_hash = 0;
+    /* Step 4: The stored hash is located immediately after the 8-byte tag */
+    long patch_offset = tag_offset + TAG_LEN;
+    unsigned long old_hash = *(unsigned long *)(data + patch_offset);
 
-    for (long off = 0; off + 4 <= data_size; off += 4) {
-        unsigned long val = *(unsigned long *)(data + data_file_offset + off);
-        if (val != 0) {
-            patch_offset = data_file_offset + off;
-            old_hash = val;
-            break;
-        }
-    }
-
-    if (patch_offset < 0) {
-        printf("ERROR: No stored hash found in .data section.\n");
-        free(data);
-        fclose(f);
-        return 1;
-    }
-```
-
-- **Lines 111-112**:
-  Initializes `patch_offset = -1` and `old_hash = 0`.
-- **Line 114 (`for (long off = 0; off + 4 <= data_size; off += 4)`)**:
-  Scans 4 bytes (32-bit dwords) at a time through the `.data` section.
-- **Line 115 (`val = *(unsigned long *)(data + data_file_offset + off);`)**:
-  Reads the 4-byte integer at the current offset.
-- **Line 116 (`if (val != 0)`)**:
-  Finds the initialized variable (`stored_hash`).
-- **Line 117 (`patch_offset = data_file_offset + off;`)**:
-  Calculates the absolute file offset on disk (e.g. `0x8000`).
-- **Line 118 (`old_hash = val;`)**:
-  Stores the current hash value found in the binary (e.g. `287671138`).
-- **Lines 123-128**:
-  Error checking to verify a non-zero hash was located.
-
----
-
-## Lines 130-144: Little-Endian Conversion and HEX Output
-
-```c
-    /* Step 5: Display HEX byte comparison */
+    /* Step 5: Prepare little-endian new hash bytes */
     unsigned char old_bytes[4];
     memcpy(old_bytes, data + patch_offset, 4);
 
@@ -296,30 +218,29 @@ int main(int argc, char *argv[]) {
     new_bytes[2] = (new_hash >> 16) & 0xFF;
     new_bytes[3] = (new_hash >> 24) & 0xFF;
 
-    printf("[*] Found stored hash in .data section at File Offset: 0x%lX\n", patch_offset);
+    printf("[*] Found Identifier \"%s\" at File Offset: 0x%lX\n", MAGIC_TAG, tag_offset);
+    printf("[*] Target Stored Hash located at File Offset:      0x%lX\n", patch_offset);
     printf("    OLD HEX Bytes:  %02X %02X %02X %02X  (Hash: %lu / 0x%08lX)\n",
            old_bytes[0], old_bytes[1], old_bytes[2], old_bytes[3], old_hash, old_hash);
     printf("    NEW HEX Bytes:  %02X %02X %02X %02X  (Hash: %lu / 0x%08lX)\n\n",
            new_bytes[0], new_bytes[1], new_bytes[2], new_bytes[3], new_hash, new_hash);
 ```
 
-- **Line 132 (`memcpy(old_bytes, data + patch_offset, 4);`)**:
-  Copies the 4 old bytes from the binary buffer.
-- **Lines 135-138**:
-  Converts the 32-bit `new_hash` integer into 4 **little-endian bytes**:
-  - `new_bytes[0] = (new_hash) & 0xFF`: Least Significant Byte (bits 0-7).
-  - `new_bytes[1] = (new_hash >> 8) & 0xFF`: Bits 8-15.
-  - `new_bytes[2] = (new_hash >> 16) & 0xFF`: Bits 16-23.
-  - `new_bytes[3] = (new_hash >> 24) & 0xFF`: Most Significant Byte (bits 24-31).
-- **Lines 140-144**:
-  Prints a clear side-by-side comparison of the old HEX bytes vs new HEX bytes.
+- **Line 98 (`long patch_offset = tag_offset + TAG_LEN;`)**:
+  Calculates the target hash address: exactly 8 bytes after the start of `"PASSTAG_"`.
+- **Line 99 (`old_hash = *(unsigned long *)(data + patch_offset);`)**:
+  Reads the current 4-byte hash scalar.
+- **Lines 104-108**:
+  Converts `new_hash` into 4 **Little-Endian bytes** (`new_bytes[0..3]`).
+- **Lines 110-115**:
+  Prints clear diagnostic before/after byte comparison.
 
 ---
 
-## Lines 146-159: Overwriting File Bytes and Finalizing
+## Lines 119-132: Overwriting File Bytes on Disk and Cleanup
 
 ```c
-    /* Step 6: Overwrite the HEX bytes on disk */
+    /* Step 6: Overwrite the 4 bytes on disk */
     fseek(f, patch_offset, SEEK_SET);
     fwrite(new_bytes, 1, 4, f);
 
@@ -335,18 +256,16 @@ int main(int argc, char *argv[]) {
 }
 ```
 
-- **Line 147 (`fseek(f, patch_offset, SEEK_SET);`)**:
-  Moves the file write cursor directly to offset `0x8000` in the open file handle `f`.
-- **Line 148 (`fwrite(new_bytes, 1, 4, f);`)**:
-  Writes the 4 new little-endian HEX bytes directly into the `check.exe` file on disk.
-- **Line 150 (`fclose(f);`)**:
-  Flushes all buffers and safely closes the file. The changes are now permanently saved.
-- **Line 151 (`free(data);`)**:
+- **Line 120 (`fseek(f, patch_offset, SEEK_SET);`)**:
+  Moves the write cursor directly to the 4-byte hash location on disk (`0x8008`).
+- **Line 121 (`fwrite(new_bytes, 1, 4, f);`)**:
+  Overwrites the old 4 bytes with the new 4 bytes on disk.
+- **Line 123 (`fclose(f);`)**:
+  Saves and closes the file.
+- **Line 124 (`free(data);`)**:
   Frees the temporary memory buffer.
-- **Lines 153-157**:
-  Prints a success message confirming the file has been modified.
-- **Line 158 (`return 0;`)**:
-  Exits the program with standard success code `0`.
+- **Line 131 (`return 0;`)**:
+  Exits cleanly with success code 0.
 
 ---
 
@@ -354,8 +273,7 @@ int main(int argc, char *argv[]) {
 
 | Concept | Explanation |
 |---|---|
-| **PE Header (`0x3C`)** | The Windows header structure pointing to section tables. |
-| **`.data` Section (`0x8000`)** | Where initialized global variables (`stored_hash`) reside. |
-| **Little-Endian Format** | Intel x86-64 stores lowest byte first (e.g. `0xFB4FC003` becomes `03 C0 4F FB`). |
-| **Direct File I/O (`rb+`)** | Allows targeted in-place byte editing without rewriting the entire file. |
-| **Zero Side-Effects** | The file size is unchanged; no other code or data is disturbed. |
+| **Magic Identifier (`PASSTAG_`)** | An 8-byte anchor tag placed right before the hash in binary memory. |
+| **Offset Calculation (`tag_offset + 8`)** | Points directly to the start of the 4-byte hash variable. |
+| **Little-Endian Format** | Lowest byte stored first (`0xFB4FC003` $\rightarrow$ `03 C0 4F FB`). |
+| **In-Place File Patching (`rb+`)** | Modifies the exact 4 bytes on disk without rewriting or resizing the executable. |

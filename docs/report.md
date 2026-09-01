@@ -1,42 +1,42 @@
 # Academic Report: Static Binary File HEX Password Patching
 
 **Course:** Computer Systems & Assembly / Reverse Engineering  
-**Project:** Binary File Modification of Hashed Password Authentication  
+**Project:** Binary File Modification of Hashed Password Authentication (Identifier Tag Method)  
 **Target Architecture:** Windows x86-64 (Portable Executable)  
 
 ---
 
 ## 1. Executive Summary
 
-This project demonstrates the principles of static binary file patching on a compiled Windows Portable Executable (`check.exe`).
+This report demonstrates the principles of static binary file patching on a compiled Windows Portable Executable (`check.exe`).
 The target application secures its access by evaluating user input against a 32-bit XOR hash stored in the initialized data section (`.data`).
 By storing a hash rather than a plaintext string, the original password (`"s3cr3t"`) is completely absent from the executable file and process memory.
 
-Using the known XOR hash algorithm, a dedicated C patching tool (`patcher.exe`) was engineered.
-The patcher opens `check.exe` on disk in binary read/write mode, parses the Windows PE headers to locate the `.data` section, computes the XOR hash for a user-specified password, and overwrites the exact 4-byte scalar in the binary HEX on disk.
+To reliably locate the stored hash inside the binary file without hardcoding fragile file offsets, the binary utilizes an **8-byte Magic Identifier Tag** (`"PASSTAG_"`) placed immediately adjacent to the hash variable in memory.
+A lightweight C patcher (`patcher.exe`) scans the binary file on disk for this identifier, calculates the XOR hash of a new password, and overwrites the adjacent 4-byte hash scalar.
 Once patched, `check.exe` permanently accepts the new password across all future executions without requiring source code recompilation.
 
 ---
 
 ## 2. Problem Statement & Threat Model
 
-In binary security analysis, client-side authentication mechanisms often attempt to protect sensitive credentials through obfuscation or hashing:
-1. **Plaintext Storage Flaw**: Storing passwords as ASCII strings allows trivial extraction using standard string inspection tools (`strings.exe` or hex editors).
-2. **Hashed Storage Enhancement**: Storing a cryptographic or arithmetic hash eliminates plaintext strings, forcing the runtime engine to compute and compare numeric values (`cmp eax, ecx`).
-3. **The Vulnerability**: Even when plaintext credentials are removed, the comparison value stored in the binary file remains mutable if the executable is not cryptographically signed.
-An analyst who knows or identifies the hashing algorithm can pre-compute the hash of an arbitrary credential and patch the stored constant on disk.
+In binary software engineering, identifying target data structures inside compiled binaries presents key challenges:
+1. **Plaintext Storage Flaw**: Storing passwords as raw ASCII strings allows trivial discovery and extraction using basic string extraction utilities (`strings.exe`).
+2. **Hashed Storage Enhancement**: Storing an integer hash conceals plaintext credentials, requiring runtime hashing and register comparison (`cmp eax, ecx`).
+3. **The Location Problem**: In compiled binaries, variable addresses can change between compiler versions and optimization levels.
+4. **The Identifier Solution**: Placing a unique, known marker (an identifier tag) directly before the target data allows automated patchers to scan for the anchor tag and reliably find the adjacent payload bytes (`offset + tag_length`).
 
 ---
 
 ## 3. Target Binary Architecture (`check.exe`)
 
-The target program implements XOR-based password verification:
+The target program organizes its authentication data using a structured configuration block in `.data`:
 
 ```c
 #include <stdio.h>
 #include <string.h>
 
-/* XOR hash function: (hash * 31) ^ character */
+/* Simple XOR hash function: (hash * 31) ^ character */
 static unsigned long hash_password(const char *str) {
     unsigned long hash = 0x5A;
     int c;
@@ -45,8 +45,16 @@ static unsigned long hash_password(const char *str) {
     return hash;
 }
 
-/* Stored hash located in the .data section of the binary */
-unsigned long stored_hash = 287671138UL;
+/* Stored password configuration with magic identifier tag */
+struct PasswordData {
+    char tag[8];                /* Identifier marker: "PASSTAG_" */
+    unsigned long stored_hash;  /* 4-byte stored hash */
+};
+
+struct PasswordData auth_data = {
+    .tag = "PASSTAG_",
+    .stored_hash = 287671138UL
+};
 
 int main(void) {
     char input[256];
@@ -60,7 +68,7 @@ int main(void) {
     input[strcspn(input, "\r\n")] = '\0';
 
     /* Validate input hash against embedded stored hash */
-    if (hash_password(input) == stored_hash) {
+    if (hash_password(input) == auth_data.stored_hash) {
         printf("Access Granted\n");
     } else {
         printf("Access Denied\n");
@@ -71,47 +79,28 @@ int main(void) {
 ```
 
 ### Key Architectural Characteristics
-- **Absence of Plaintext**: The word `"s3cr3t"` does not exist in `.rdata` or `.data`.
-- **Register Comparison**: The assembly comparison evaluates two 32-bit registers (`cmp eax, ecx`) rather than calling string comparison routines (`strcmp`).
-- **Static Storage**: `stored_hash` is an initialized global variable, which the compiler assigns to a fixed offset in the `.data` PE section.
+- **Absence of Plaintext**: The word `"s3cr3t"` does not exist anywhere in `.rdata` or `.data`.
+- **Contiguous Layout**: Grouping `tag` and `stored_hash` inside `struct PasswordData` guarantees the compiler places `stored_hash` directly after `"PASSTAG_"` in memory.
+- **Register Comparison**: The assembly comparison evaluates two 32-bit registers (`cmp eax, ecx`).
 
 ---
 
 ## 4. Windows PE Structure & Binary Memory Layout
 
-Windows executable files follow the Portable Executable (PE) specification.
-The binary is divided into distinct sections:
+In the Windows PE format, variables in `struct PasswordData` are assigned to the initialized `.data` section at file offset `0x8000`:
 
-| Section Name | Contents | Permissions | Role in `check.exe` |
+```text
+check.exe Raw Binary HEX at File Offset 0x8000:
+
+Offset 0x8000:  50 41 53 53 54 41 47 5F  03 C0 4F FB  00 00 00 00  |PASSTAG_..O.....|
+                ▲                       ▲
+                8-byte Tag ("PASSTAG_") 4-byte Hash (offset 0x8008)
+```
+
+| Field | File Offset | Size | Value / Description |
 |---|---|---|---|
-| `.text` | Executable Machine Code | Read / Execute (`RX`) | Contains `main` and `hash_password` CPU instructions. |
-| `.rdata` | Read-Only Constants | Read-Only (`R`) | Contains string literals (`"Enter Password: "`, `"Access Granted\n"`). |
-| `.data` | Initialized Global Variables | Read / Write (`RW`) | Contains `stored_hash = 287671138` at file offset `0x8000`. |
-| `.bss` | Uninitialized Variables | Read / Write (`RW`) | Reserved space for zero-initialized data. |
-
-### Header Navigation to Offset `0x8000`
-1. **DOS Header (`0x0000`)**: Starts with magic bytes `4D 5A` (`MZ`). Offset `0x003C` (`e_lfanew`) stores the 4-byte pointer to the PE header (`0x0080`).
-2. **PE Header (`0x0080`)**: Starts with signature `50 45 00 00` (`PE\0\0`), specifying the architecture (x86-64) and section count.
-3. **Section Table (`0x0188`)**: Contains 40-byte descriptors for each section.
-The `.data` descriptor specifies:
-   - `PointerToRawData = 0x8000` (file offset on disk).
-   - `SizeOfRawData = 0x0200` (512 bytes).
-
-```
-check.exe File Layout on Disk:
-+-------------------------------------------------------+
-| DOS Header (MZ) [0x0000 - 0x003F]                    |
-+-------------------------------------------------------+
-| PE Header (PE\0\0) [0x0080 - 0x0187]                  |
-+-------------------------------------------------------+
-| Section Table (.text, .data, .rdata) [0x0188]         |
-+-------------------------------------------------------+
-| .text Section (Code) [0x0600 - 0x7FFF]                |
-+-------------------------------------------------------+
-| .data Section [0x8000 - 0x81FF]                       |
-|   --> Offset 0x8000: [62 83 25 11] (stored_hash)      |
-+-------------------------------------------------------+
-```
+| `auth_data.tag` | `0x8000` | 8 bytes | `50 41 53 53 54 41 47 5F` (`"PASSTAG_"`) |
+| `auth_data.stored_hash` | `0x8008` | 4 bytes | `62 83 25 11` (Little-endian hash: `287671138`) |
 
 ---
 
@@ -136,7 +125,6 @@ jmp     .loop
 ```
 
 ### Little-Endian Byte Encoding
-Intel x86-64 uses Little-Endian representation (least significant byte stored first):
 
 | Password | Decimal Hash | Hexadecimal Value | Little-Endian Bytes on Disk |
 |---|---|---|---|
@@ -149,12 +137,15 @@ Intel x86-64 uses Little-Endian representation (least significant byte stored fi
 
 ## 6. Binary Patcher Implementation (`patcher.c`)
 
-The patcher program implements in-place binary modification using standard C file I/O:
+The patcher program scans for the `"PASSTAG_"` identifier and updates the adjacent 4 bytes on disk:
 
 ```c
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define MAGIC_TAG "PASSTAG_"
+#define TAG_LEN 8
 
 static unsigned long xor_hash(const char *str) {
     unsigned long hash = 0x5A;
@@ -181,33 +172,28 @@ int main(int argc, char *argv[]) {
     long file_size = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    unsigned char *data = (unsigned char *)malloc(file_size);
+    unsigned char *data = malloc(file_size);
     fread(data, 1, file_size, f);
 
-    /* Locate .data section from PE section headers */
-    unsigned long pe_offset = *(unsigned long *)(data + 0x3C);
-    unsigned short num_sections = *(unsigned short *)(data + pe_offset + 6);
-    unsigned short opt_hdr_size = *(unsigned short *)(data + pe_offset + 20);
-    unsigned long sections_start = pe_offset + 24 + opt_hdr_size;
-
-    long data_file_offset = -1;
-    for (int i = 0; i < num_sections; i++) {
-        unsigned char *sec = data + sections_start + (i * 40);
-        if (strncmp((char *)sec, ".data", 5) == 0) {
-            data_file_offset = *(unsigned long *)(sec + 20);
+    /* Scan binary for the 8-byte magic tag */
+    long tag_offset = -1;
+    for (long i = 0; i <= file_size - TAG_LEN - 4; i++) {
+        if (memcmp(data + i, MAGIC_TAG, TAG_LEN) == 0) {
+            tag_offset = i;
             break;
         }
     }
 
-    /* Convert 32-bit new_hash into 4 Little-Endian bytes */
+    /* Target hash is located at tag_offset + TAG_LEN */
+    long patch_offset = tag_offset + TAG_LEN;
+
     unsigned char new_bytes[4];
     new_bytes[0] = (new_hash) & 0xFF;
     new_bytes[1] = (new_hash >> 8) & 0xFF;
     new_bytes[2] = (new_hash >> 16) & 0xFF;
     new_bytes[3] = (new_hash >> 24) & 0xFF;
 
-    /* Overwrite the 4 bytes at offset 0x8000 on disk */
-    fseek(f, data_file_offset, SEEK_SET);
+    fseek(f, patch_offset, SEEK_SET);
     fwrite(new_bytes, 1, 4, f);
 
     fclose(f);
@@ -216,16 +202,9 @@ int main(int argc, char *argv[]) {
 }
 ```
 
-### Why Password Length Does Not Affect File Integrity
-In plaintext patching, substituting a short password with a long password causes buffer overflows that corrupt adjacent memory structures.
-Because hashing maps any variable-length input string to a **fixed 4-byte scalar**, `patcher.exe` always writes exactly 4 bytes.
-The file size of `check.exe` remains strictly unchanged, guaranteeing zero side-effects on adjacent code or data structures.
-
 ---
 
 ## 7. Empirical Test Logs & Verification
-
-The patching workflow was verified through end-to-end testing in a PowerShell environment:
 
 ```text
 ======================================================================
@@ -244,14 +223,16 @@ STEP 2: Execute patcher.exe to set new password "mypass"
 ======================================================================
 PS > ./patcher.exe check.exe mypass
 ============================================================
-                  Binary File HEX Patcher                   
+        Binary File HEX Patcher (Identifier Tag Method)     
 ============================================================
 
 Target File:  check.exe
+Identifier:   "PASSTAG_" (8 bytes)
 New Password: "mypass"
 New Hash:     4216307715 (Hex: 0xFB4FC003)
 
-[*] Found stored hash in .data section at File Offset: 0x8000
+[*] Found Identifier "PASSTAG_" at File Offset: 0x8000
+[*] Target Stored Hash located at File Offset:      0x8008
     OLD HEX Bytes:  62 83 25 11  (Hash: 287671138 / 0x11258362)
     NEW HEX Bytes:  03 C0 4F FB  (Hash: 4216307715 / 0xFB4FC003)
 
@@ -275,7 +256,8 @@ Enter Password: Access Denied
 STEP 4: Re-patch with another password ("newpass2026")
 ======================================================================
 PS > ./patcher.exe check.exe newpass2026
-[*] Found stored hash in .data section at File Offset: 0x8000
+[*] Found Identifier "PASSTAG_" at File Offset: 0x8000
+[*] Target Stored Hash located at File Offset:      0x8008
     OLD HEX Bytes:  03 C0 4F FB  (Hash: 4216307715 / 0xFB4FC003)
     NEW HEX Bytes:  2D 0D 3E D0  (Hash: 3493721389 / 0xD03E0D2D)
 
@@ -290,20 +272,7 @@ Enter Password: Access Denied
 
 ---
 
-## 8. Security Implications & Countermeasures
+## 8. Conclusion
 
-| Security Aspect | Analysis |
-|---|---|
-| **Vulnerability** | Static binary constants can be rewritten on disk using simple file I/O. |
-| **Why Hashing Alone Fails** | Hashing conceals plaintext strings but leaves the target comparison hash mutable. |
-| **Industry Mitigation 1** | **Digital Code Signing**: Windows Authenticode signatures detect file modifications and block execution if hashes do not match the certificate. |
-| **Industry Mitigation 2** | **Server-Side Authentication**: Moving authentication logic to a remote backend prevents local binary modification attacks. |
-| **Industry Mitigation 3** | **Anti-Tamper Envelopes**: Packing and integrity self-checks (e.g. CRC32 / SHA-256 over code sections at startup) terminate the process if modifications occur. |
-
----
-
-## 9. Conclusion
-
-This project successfully demonstrates the theory and practice of static binary file HEX patching.
-By understanding the PE file structure, locating initialized variables within the `.data` section, and mapping hash calculations to little-endian byte arrays, executable files can be modified directly on disk.
-The patcher achieves in-place binary modification cleanly and reliably without source code recompilation.
+This project demonstrates how binary identifiers (anchor tags) provide robust, reliable in-place binary modification.
+By searching for a distinct marker byte sequence and overwriting adjacent little-endian payload bytes, binary executables can be customized on disk cleanly and accurately without requiring fixed hardcoded offsets or source code recompilation.

@@ -1,12 +1,13 @@
 /*
- * patcher.c - Binary File HEX Password Patcher
+ * patcher.c - Binary File HEX Password Patcher (Identifier Tag Method)
  *
  * How it works:
- *   1. Opens the target .exe file directly on disk in binary read/write mode.
+ *   1. Opens the target .exe file on disk in binary read/write mode ("rb+").
  *   2. Computes the XOR hash of the new password: (hash * 31) ^ character.
- *   3. Scans the binary HEX of the file to locate the embedded 4-byte hash.
- *   4. Replaces the old HEX bytes with the new hash HEX bytes on disk.
- *   5. Closes the file. When check.exe is opened again, it uses the new password!
+ *   3. Scans the binary file searching for the magic identifier tag ("PASSTAG_").
+ *   4. The 4 bytes immediately following the tag (offset + 8) hold the stored hash.
+ *   5. Replaces the old HEX bytes with the new hash HEX bytes on disk.
+ *   6. Closes the file. When check.exe is run again, it accepts the new password!
  *
  * Usage: patcher.exe <target.exe> <new_password>
  * Example: patcher.exe check.exe mypass
@@ -17,6 +18,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The 8-byte magic identifier placed before the stored hash */
+#define MAGIC_TAG "PASSTAG_"
+#define TAG_LEN 8
 
 /* Known XOR hash function: (hash * 31) ^ character (initial seed: 0x5A) */
 static unsigned long xor_hash(const char *str) {
@@ -39,9 +44,10 @@ int main(int argc, char *argv[]) {
     unsigned long new_hash = xor_hash(new_password);
 
     printf("============================================================\n");
-    printf("                  Binary File HEX Patcher                   \n");
+    printf("        Binary File HEX Patcher (Identifier Tag Method)     \n");
     printf("============================================================\n\n");
     printf("Target File:  %s\n", target_path);
+    printf("Identifier:   \"%s\" (%d bytes)\n", MAGIC_TAG, TAG_LEN);
     printf("New Password: \"%s\"\n", new_password);
     printf("New Hash:     %lu (Hex: 0x%08lX)\n\n", new_hash, new_hash);
 
@@ -65,62 +71,27 @@ int main(int argc, char *argv[]) {
     }
     fread(data, 1, file_size, f);
 
-    /* Step 3: Parse PE headers to locate the .data section */
-    if (data[0] != 'M' || data[1] != 'Z') {
-        printf("ERROR: Not a valid Windows PE executable (missing MZ header).\n");
-        free(data);
-        fclose(f);
-        return 1;
-    }
-
-    unsigned long pe_offset = *(unsigned long *)(data + 0x3C);
-    unsigned short num_sections = *(unsigned short *)(data + pe_offset + 6);
-    unsigned short opt_hdr_size = *(unsigned short *)(data + pe_offset + 20);
-    unsigned long sections_start = pe_offset + 24 + opt_hdr_size;
-
-    long data_file_offset = -1;
-    long data_size = 0;
-
-    for (int i = 0; i < num_sections; i++) {
-        unsigned char *sec = data + sections_start + (i * 40);
-        char name[9] = {0};
-        memcpy(name, sec, 8);
-
-        if (strcmp(name, ".data") == 0) {
-            data_size = *(unsigned long *)(sec + 16);
-            data_file_offset = *(unsigned long *)(sec + 20);
+    /* Step 3: Scan the binary file for the MAGIC_TAG identifier */
+    long tag_offset = -1;
+    for (long i = 0; i <= file_size - TAG_LEN - 4; i++) {
+        if (memcmp(data + i, MAGIC_TAG, TAG_LEN) == 0) {
+            tag_offset = i;
             break;
         }
     }
 
-    if (data_file_offset < 0) {
-        printf("ERROR: .data section not found in PE binary.\n");
+    if (tag_offset < 0) {
+        printf("ERROR: Magic identifier \"%s\" not found in \"%s\".\n", MAGIC_TAG, target_path);
         free(data);
         fclose(f);
         return 1;
     }
 
-    /* Step 4: Find the stored hash location in .data section */
-    long patch_offset = -1;
-    unsigned long old_hash = 0;
+    /* Step 4: The stored hash is located immediately after the 8-byte tag */
+    long patch_offset = tag_offset + TAG_LEN;
+    unsigned long old_hash = *(unsigned long *)(data + patch_offset);
 
-    for (long off = 0; off + 4 <= data_size; off += 4) {
-        unsigned long val = *(unsigned long *)(data + data_file_offset + off);
-        if (val != 0) {
-            patch_offset = data_file_offset + off;
-            old_hash = val;
-            break;
-        }
-    }
-
-    if (patch_offset < 0) {
-        printf("ERROR: No stored hash found in .data section.\n");
-        free(data);
-        fclose(f);
-        return 1;
-    }
-
-    /* Step 5: Display HEX byte comparison */
+    /* Step 5: Prepare little-endian new hash bytes */
     unsigned char old_bytes[4];
     memcpy(old_bytes, data + patch_offset, 4);
 
@@ -130,13 +101,14 @@ int main(int argc, char *argv[]) {
     new_bytes[2] = (new_hash >> 16) & 0xFF;
     new_bytes[3] = (new_hash >> 24) & 0xFF;
 
-    printf("[*] Found stored hash in .data section at File Offset: 0x%lX\n", patch_offset);
+    printf("[*] Found Identifier \"%s\" at File Offset: 0x%lX\n", MAGIC_TAG, tag_offset);
+    printf("[*] Target Stored Hash located at File Offset:      0x%lX\n", patch_offset);
     printf("    OLD HEX Bytes:  %02X %02X %02X %02X  (Hash: %lu / 0x%08lX)\n",
            old_bytes[0], old_bytes[1], old_bytes[2], old_bytes[3], old_hash, old_hash);
     printf("    NEW HEX Bytes:  %02X %02X %02X %02X  (Hash: %lu / 0x%08lX)\n\n",
            new_bytes[0], new_bytes[1], new_bytes[2], new_bytes[3], new_hash, new_hash);
 
-    /* Step 6: Overwrite the HEX bytes on disk */
+    /* Step 6: Overwrite the 4 bytes on disk */
     fseek(f, patch_offset, SEEK_SET);
     fwrite(new_bytes, 1, 4, f);
 

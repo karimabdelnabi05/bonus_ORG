@@ -3,7 +3,9 @@
  *
  * This program validates a password against an XOR hash
  * stored inside the binary's .data section.
- * The plaintext password is not stored in the binary.
+ *
+ * An 8-byte identifier tag ("PASSTAG_") is placed directly adjacent
+ * to stored_hash inside a struct so the patcher can locate it reliably.
  *
  * Default Password: "s3cr3t" -> Hash: 287671138 (0x11258362)
  *
@@ -22,8 +24,16 @@ static unsigned long hash_password(const char *str) {
     return hash;
 }
 
-/* Stored hash located in the .data section of the binary */
-unsigned long stored_hash = 287671138UL;
+/* Stored password configuration with magic identifier tag */
+struct PasswordData {
+    char tag[8];                /* Identifier marker: "PASSTAG_" */
+    unsigned long stored_hash;  /* 4-byte stored hash */
+};
+
+struct PasswordData auth_data = {
+    .tag = "PASSTAG_",
+    .stored_hash = 287671138UL
+};
 
 int main(void) {
     char input[256];
@@ -37,7 +47,7 @@ int main(void) {
     input[strcspn(input, "\r\n")] = '\0';
 
     /* Validate input hash against embedded stored hash */
-    if (hash_password(input) == stored_hash) {
+    if (hash_password(input) == auth_data.stored_hash) {
         printf("Access Granted\n");
     } else {
         printf("Access Denied\n");
