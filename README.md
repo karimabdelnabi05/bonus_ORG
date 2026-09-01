@@ -1,14 +1,15 @@
-# Binary File HEX Password Patcher (Identifier Tag Method)
+# Binary File HEX Password Patcher (Hashed Identifier Method)
 
-A clean demonstration of static binary file HEX patching on a compiled Windows executable using a magic identifier tag (`"PASSTAG_"`) to locate and update an embedded XOR password hash.
+A demonstration of static binary file HEX patching on a compiled Windows executable where **both the identifier tag and the password are stored as 32-bit XOR hashes**.
+This guarantees that **zero plaintext strings** exist in the binary file.
 
 ---
 
 ## 📌 Project Overview
 
-1. **The Target Binary (`check.exe`)**: A compiled executable that stores an 8-byte identifier tag (`"PASSTAG_"`) immediately before a 4-byte XOR password hash in the `.data` section.
-2. **The Patcher Tool (`patcher.exe`)**: A C program that opens `check.exe` on disk, calculates the XOR hash of your chosen new password, scans the binary HEX for the `"PASSTAG_"` identifier, and overwrites the adjacent 4-byte hash on disk.
-3. **The Patched Binary**: When `check.exe` is executed again, it is permanently modified on disk to accept the new password.
+1. **The Target Binary (`check.exe`)**: A compiled executable that stores a 4-byte **Hashed Identifier Tag** (`xor_hash("PASSTAG")` = `192292035` / Bytes: `C3 24 76 0B`) immediately before the 4-byte XOR password hash in the `.data` section.
+2. **The Patcher Tool (`patcher.exe`)**: A C program that opens `check.exe` on disk, calculates the XOR hash of the tag identifier (`C3 24 76 0B`), scans the binary HEX for those 4 bytes, computes the XOR hash of your new password, and overwrites the adjacent 4-byte hash on disk.
+3. **The Patched Binary**: When `check.exe` is executed again, it reads the updated hash from disk and permanently unlocks with the new password.
 
 ---
 
@@ -35,16 +36,16 @@ echo mypass | ./check.exe
 ```
 ```text
 ============================================================
-        Binary File HEX Patcher (Identifier Tag Method)     
+      Binary File HEX Patcher (Hashed Identifier Method)    
 ============================================================
 
-Target File:  check.exe
-Identifier:   "PASSTAG_" (8 bytes)
-New Password: "mypass"
-New Hash:     4216307715 (Hex: 0xFB4FC003)
+Target File:      check.exe
+Identifier:       "PASSTAG" -> HASH: 192292035 (Hex: 0x0B7624C3)
+Tag Search Bytes: C3 24 76 0B
+New Password:     "mypass" -> HASH: 4216307715 (Hex: 0xFB4FC003)
 
-[*] Found Identifier "PASSTAG_" at File Offset: 0x8000
-[*] Target Stored Hash located at File Offset:      0x8008
+[*] Found Hashed Tag at File Offset:          0x8000 (Bytes: C3 24 76 0B)
+[*] Target Stored Hash located at File Offset: 0x8004
     OLD HEX Bytes:  62 83 25 11  (Hash: 287671138 / 0x11258362)
     NEW HEX Bytes:  03 C0 4F FB  (Hash: 4216307715 / 0xFB4FC003)
 
@@ -67,35 +68,39 @@ echo s3cr3t | ./check.exe
 
 ## 🔍 How It Works (The 3 Steps)
 
-### Step 1: Known Hash Algorithm
-`check.exe` calculates the hash of user input using a known XOR hash formula:
-$$\text{hash}_{n} = (\text{hash}_{n-1} \times 31) \oplus \text{ASCII}(c) \quad \text{with seed } \text{hash}_0 = \texttt{0x5A}$$
+### Step 1: Known XOR Hash Formula
+Both the tag and the password use the exact same XOR hash algorithm:
+$$\text{hash}_{n} = (\text{hash}_{n-1} \times 31) \oplus \text{ASCII}(c) \quad \text{with initial seed } \text{hash}_0 = \texttt{0x5A}$$
 
-### Step 2: Identifier Tag in Binary HEX
-Inside `check.c`, the identifier tag and stored hash are defined inside a continuous memory struct:
+- **Tag `"PASSTAG"`** $\rightarrow$ `192292035` (`0x0B7624C3` $\rightarrow$ Little-Endian bytes: `C3 24 76 0B`)
+- **Password `"s3cr3t"`** $\rightarrow$ `287671138` (`0x11258362` $\rightarrow$ Little-Endian bytes: `62 83 25 11`)
+- **New Password `"mypass"`** $\rightarrow$ `4216307715` (`0xFB4FC003` $\rightarrow$ Little-Endian bytes: `03 C0 4F FB`)
+
+### Step 2: Binary Layout on Disk (No Plaintext)
+Inside `check.c`, both values are grouped in a struct:
 
 ```c
-struct PasswordData {
-    char tag[8];                /* "PASSTAG_" */
-    unsigned long stored_hash;  /* 4-byte hash */
+struct AuthData {
+    unsigned long tag_hash;     /* 4-byte hash: 192292035 */
+    unsigned long stored_hash;  /* 4-byte hash: 287671138 */
 };
 ```
 
 In the raw binary HEX of `check.exe` at file offset `0x8000`:
 ```text
-Offset 0x8000: [50 41 53 53 54 41 47 5F] [62 83 25 11]  |PASSTAG_b.%.....|
-               ▲                         ▲
-               8-byte Identifier         4-byte Hash (287671138)
+Offset 0x8000:  [ C3 24 76 0B ]  [ 62 83 25 11 ]
+                └──────┬──────┘  └──────┬──────┘
+                   4-byte Hashed     4-byte Hashed
+                   Tag Identifier       Password
 ```
 
-### Step 3: Direct Binary HEX Modification
+### Step 3: Binary Modification
 `patcher.exe` scans `check.exe` on disk:
-1. Locates the 8-byte byte sequence `PASSTAG_` (`50 41 53 53 54 41 47 5F`).
-2. Calculates target write offset: `tag_offset + 8`.
-3. Overwrites the 4 HEX bytes (`62 83 25 11` $\rightarrow$ `03 C0 4F FB`) using `fwrite()`.
-4. Closes the file.
-
-When `check.exe` is executed at any point in the future, it loads the new hash bytes directly from `.data`.
+1. Calculates `xor_hash("PASSTAG")` to produce search bytes `C3 24 76 0B`.
+2. Scans the binary file until it matches `C3 24 76 0B` at offset `0x8000`.
+3. Calculates target write offset: `tag_offset + 4` (`0x8004`).
+4. Overwrites the 4 bytes on disk (`62 83 25 11` $\rightarrow$ `03 C0 4F FB`) using `fwrite()`.
+5. Closes the file.
 
 ---
 
@@ -103,8 +108,8 @@ When `check.exe` is executed at any point in the future, it loads the new hash b
 
 | File | Description |
 |---|---|
-| [`src/check.c`](src/check.c) | Target executable with `"PASSTAG_"` identifier and XOR hash authentication. |
-| [`src/patcher.c`](src/patcher.c) | Binary HEX file patcher that searches for `"PASSTAG_"` and updates adjacent bytes. |
+| [`src/check.c`](src/check.c) | Target executable with hashed tag (`C3 24 76 0B`) and XOR password authentication. |
+| [`src/patcher.c`](src/patcher.c) | Binary HEX file patcher that searches for the hashed tag and updates adjacent bytes. |
 | [`docs/presentation-guide.md`](docs/presentation-guide.md) | Oral presentation guide, spoken script, and Q&A for the doctor/professor. |
 | [`docs/code-explanation.md`](docs/code-explanation.md) | Exhaustive line-by-line breakdown and explanation of `patcher.c`. |
-| [`docs/report.md`](docs/report.md) | Full academic report detailing the identifier method, PE format, and verification logs. |
+| [`docs/report.md`](docs/report.md) | Full academic report detailing the hashed identifier architecture and verification logs. |

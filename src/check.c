@@ -1,13 +1,13 @@
 /*
- * check.c - Target program with hashed password verification
+ * check.c - Target program with hashed password & hashed tag verification
  *
- * This program validates a password against an XOR hash
- * stored inside the binary's .data section.
+ * Both the identifier tag and the password are stored as 32-bit XOR hashes.
+ * This guarantees that NO plaintext strings (neither password nor tag) exist in the binary.
  *
- * An 8-byte identifier tag ("PASSTAG_") is placed directly adjacent
- * to stored_hash inside a struct so the patcher can locate it reliably.
+ * Known XOR Hash Formula: (hash * 31) ^ character (seed: 0x5A)
  *
- * Default Password: "s3cr3t" -> Hash: 287671138 (0x11258362)
+ * Tag:      "PASSTAG" -> tag_hash    = 192292035 (Hex: 0x0B7624C3, Bytes: C3 24 76 0B)
+ * Password: "s3cr3t"  -> stored_hash = 287671138 (Hex: 0x11258362, Bytes: 62 83 25 11)
  *
  * Compile: gcc -o check.exe src/check.c
  */
@@ -15,7 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Simple XOR hash function: (hash * 31) ^ character */
+/* Known XOR hash function: (hash * 31) ^ character */
 static unsigned long hash_password(const char *str) {
     unsigned long hash = 0x5A;
     int c;
@@ -24,15 +24,15 @@ static unsigned long hash_password(const char *str) {
     return hash;
 }
 
-/* Stored password configuration with magic identifier tag */
-struct PasswordData {
-    char tag[8];                /* Identifier marker: "PASSTAG_" */
-    unsigned long stored_hash;  /* 4-byte stored hash */
+/* Stored authentication structure: both tag and password are 4-byte hashes */
+struct AuthData {
+    unsigned long tag_hash;     /* Hashed identifier: xor_hash("PASSTAG") */
+    unsigned long stored_hash;  /* 4-byte stored password hash */
 };
 
-struct PasswordData auth_data = {
-    .tag = "PASSTAG_",
-    .stored_hash = 287671138UL
+struct AuthData auth = {
+    .tag_hash = 192292035UL,    /* 0x0B7624C3 (Bytes: C3 24 76 0B) */
+    .stored_hash = 287671138UL  /* 0x11258362 (Bytes: 62 83 25 11) */
 };
 
 int main(void) {
@@ -47,7 +47,7 @@ int main(void) {
     input[strcspn(input, "\r\n")] = '\0';
 
     /* Validate input hash against embedded stored hash */
-    if (hash_password(input) == auth_data.stored_hash) {
+    if (hash_password(input) == auth.stored_hash) {
         printf("Access Granted\n");
     } else {
         printf("Access Denied\n");
