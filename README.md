@@ -105,5 +105,6 @@ When `check.exe` is executed at any point in the future, it loads the new hash b
 |---|---|
 | [`src/check.c`](src/check.c) | Target executable with `"PASSTAG_"` identifier and XOR hash authentication. |
 | [`src/patcher.c`](src/patcher.c) | Binary HEX file patcher that searches for `"PASSTAG_"` and updates adjacent bytes. |
+| [`docs/presentation-guide.md`](docs/presentation-guide.md) | Oral presentation guide, spoken script, and Q&A for the doctor/professor. |
 | [`docs/code-explanation.md`](docs/code-explanation.md) | Exhaustive line-by-line breakdown and explanation of `patcher.c`. |
 | [`docs/report.md`](docs/report.md) | Full academic report detailing the identifier method, PE format, and verification logs. |
